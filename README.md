@@ -98,7 +98,7 @@ python main.py --model gpt-oss --triple_curie 'NCBIGene:6495' 'affects' 'UMLS:C0
 python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' --pmids-file pmids.txt
 ```
 
-**Qualified Triples (New Feature):**
+**Qualified Triples:**
 ```bash
 # With all qualifiers
 python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' \
