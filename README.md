@@ -80,7 +80,7 @@ Then open your browser to `http://localhost:8501` and use the interactive interf
 
 #### Command Line Interface
 
-**Using Entity Names:**
+**Basic Triples Using Entity Names:**
 ```bash
 # Using GPT-OSS 120B
 python main.py --model gpt-oss --triple_name 'SIX1' 'affects' 'Cell Proliferation' --pmids 34513929 16488997
@@ -89,7 +89,7 @@ python main.py --model gpt-oss --triple_name 'SIX1' 'affects' 'Cell Proliferatio
 python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' --pmids 34513929
 ```
 
-**Using CURIEs:**
+**Basic Triples Using CURIEs:**
 ```bash
 # Using GPT-OSS 120B
 python main.py --model gpt-oss --triple_curie 'NCBIGene:6495' 'affects' 'UMLS:C0596290' --pmids 34513929 16488997
@@ -97,6 +97,35 @@ python main.py --model gpt-oss --triple_curie 'NCBIGene:6495' 'affects' 'UMLS:C0
 # Using Hermes 4 70B with file input
 python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' --pmids-file pmids.txt
 ```
+
+**Qualified Triples (New Feature):**
+```bash
+# With all qualifiers
+python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' \
+  --qualified_predicate 'causes' \
+  --qualified_object_aspect 'activity' \
+  --qualified_object_direction 'increased' \
+  --pmids 34513929
+
+# With only direction qualifier
+python main.py --model gpt-oss --triple_curie 'NCBIGene:6495' 'affects' 'UMLS:C0596290' \
+  --qualified_predicate 'causes' \
+  --qualified_object_direction 'upregulated' \
+  --pmids 34513929
+
+# With only aspect qualifier  
+python main.py --model hermes4 --triple_name 'SIX1' 'affects' 'Cell Proliferation' \
+  --qualified_predicate 'causes' \
+  --qualified_object_aspect 'activity_or_abundance' \
+  --pmids 34513929
+```
+
+Qualifiers include:
+- **Qualified Predicate** (required): More specific relationship (e.g., `causes`)
+- **Object Aspect** (optional): What aspect is affected (e.g., `activity`, `abundance`, `activity_or_abundance`, `localization`)
+- **Object Direction** (optional): Direction of change (e.g., `increased`, `decreased`, `upregulated`, `downregulated`)
+
+**Constraint**: If using qualifiers, `qualified_predicate` is required and at least one of `qualified_object_aspect` or `qualified_object_direction` must be provided.
 
 ## Available Models
 

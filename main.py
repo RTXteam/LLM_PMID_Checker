@@ -20,14 +20,18 @@ async def main():
     parser = argparse.ArgumentParser(
         description="Check research triples against PMID abstracts using Ollama LLMs",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=        """
 Examples:
-  # Using names (requires node normalization)
+  # Basic triples using names (requires node normalization)
   python main.py --model gpt-oss --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
   python main.py --model hermes4 --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
   
-  # Using CURIEs directly
+  # Basic triples using CURIEs directly
   python main.py --model gpt-oss --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --pmids 16186693 29083299
+  
+  # With qualifiers - must provide qualified_predicate and at least one of qualified_object_aspect/qualified_object_direction
+  python main.py --model hermes4 --triple_name "SIX1" "affects" "Cell Proliferation" --qualified_predicate "causes" --qualified_object_aspect "activity" --qualified_object_direction "increased" --pmids 16186693 29083299
+  python main.py --model gpt-oss --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --qualified_predicate "causes" --qualified_object_direction "upregulated" --pmids 16186693 29083299
         """
     )
     
@@ -44,6 +48,20 @@ Examples:
         nargs=3,
         metavar=('SUBJECT_NAME', 'PREDICATE', 'OBJECT_NAME'),
         help='Research triple as names (e.g., "SIX1" "affects" "Cell Proliferation")'
+    )
+    
+    # Qualifier options
+    parser.add_argument(
+        '--qualified_predicate',
+        help='Qualified predicate (e.g., "causes"). Required if any qualifier is used.'
+    )
+    parser.add_argument(
+        '--qualified_object_aspect',
+        help='Object aspect qualifier (e.g., "activity", "abundance", "activity_or_abundance"). Optional.'
+    )
+    parser.add_argument(
+        '--qualified_object_direction',
+        help='Object direction qualifier (e.g., "increased", "decreased", "upregulated", "downregulated"). Optional.'
     )
     
     # PMID specification
@@ -72,6 +90,22 @@ Examples:
     
     # Set up logging
     setup_logging(args.verbose)
+    
+    # Validate qualifier constraints
+    has_any_qualifier = any([
+        args.qualified_predicate,
+        args.qualified_object_aspect,
+        args.qualified_object_direction
+    ])
+    
+    if has_any_qualifier:
+        if not args.qualified_predicate:
+            print("Error: qualified_predicate is required when using any qualifiers", file=sys.stderr)
+            return 1
+        
+        if not args.qualified_object_aspect and not args.qualified_object_direction:
+            print("Error: At least one of qualified_object_aspect or qualified_object_direction must be provided when using qualifiers", file=sys.stderr)
+            return 1
     
     # Parse triple and get equivalent names
     normalization_client = NodeNormalizationClient()
@@ -163,7 +197,10 @@ Examples:
             object_=triple_with_names['object'],
             subject_names=triple_with_names['subject_names'],
             object_names=triple_with_names['object_names'],
-            pmids=pmids
+            pmids=pmids,
+            qualified_predicate=args.qualified_predicate,
+            qualified_object_aspect=args.qualified_object_aspect,
+            qualified_object_direction=args.qualified_object_direction
         )
         
         # Output results

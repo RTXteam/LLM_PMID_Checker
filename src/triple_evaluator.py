@@ -18,15 +18,39 @@ class TripleEvaluationResult:
         """Format the evaluation results"""
         lines = []
         for eval_result in self.evaluations:
-            if eval_result.is_supported:
-                supporting_text = f", [{eval_result.supporting_sentence}]" if eval_result.supporting_sentence else ""
-                lines.append(f"Yes, PMID:{eval_result.pmid}{supporting_text}")
-            else:
-                lines.append(f"No, PMID:{eval_result.pmid}")
+            # Map evidence categories to display formats
+            category_map = {
+                "direct_evidence": "Direct evidence",
+                "opposite_assertion": "Opposite Assertion",
+                "related_not_direct": "Related (Not Direct)",
+                "not_supported": "Not mentioned or not related",
+                "dont_know": "Unknown"
+            }
             
-            # Add detailed reasoning in verbose mode
+            category_display = category_map.get(eval_result.evidence_category, "Unknown")
+            
+            # Update supported logic: direct_evidence and related_not_direct are both supported
+            is_supported = eval_result.evidence_category in ["direct_evidence", "related_not_direct"]
+            
+            # Build the main line with all key information
+            supported_text = "Supported" if is_supported else "Not Supported"
+            subject_mentioned = "Yes" if eval_result.subject_mentioned else "No"
+            object_mentioned = "Yes" if eval_result.object_mentioned else "No"
+            
+            # Main output line with key information in requested order: PMID → Supported → Category → Subject → Object → Supporting Sentence
+            main_line = f"PMID:{eval_result.pmid}, {supported_text}, {category_display}, Subject:{subject_mentioned}, Object:{object_mentioned}"
+            
+            # Add supporting sentence if available
+            if eval_result.evidence_category in ["direct_evidence", "related_not_direct"] and eval_result.supporting_sentence:
+                main_line += f", [{eval_result.supporting_sentence}]"
+            
+            lines.append(main_line)
+            
+            # Add detailed reasoning in verbose mode (without confidence)
             if verbose:
-                lines.append(f"  Confidence: {eval_result.confidence}")
+                lines.append(f"  Evidence Category: {eval_result.evidence_category}")
+                lines.append(f"  Subject Mentioned: {'Yes' if eval_result.subject_mentioned else 'No'}")
+                lines.append(f"  Object Mentioned: {'Yes' if eval_result.object_mentioned else 'No'}")
                 lines.append(f"  Supporting sentence: {eval_result.supporting_sentence}")
                 lines.append(f"  Reasoning: {eval_result.reasoning}")
                 lines.append("")
@@ -35,7 +59,9 @@ class TripleEvaluationResult:
     
     def get_summary(self) -> Dict[str, Any]:
         """Get a summary of the evaluation results."""
-        supported_count = sum(1 for eval_result in self.evaluations if eval_result.is_supported)
+        # Update supported logic: direct_evidence and related_not_direct are both supported
+        supported_count = sum(1 for eval_result in self.evaluations 
+                            if eval_result.evidence_category in ["direct_evidence", "related_not_direct"])
         total_count = len(self.evaluations)
         unsupported_count = total_count - supported_count
         
@@ -73,7 +99,10 @@ class TripleEvaluatorSystem:
                                        object_: str,
                                        subject_names: List[str] = None,
                                        object_names: List[str] = None,
-                                       pmids: List[str] = None) -> TripleEvaluationResult:
+                                       pmids: List[str] = None,
+                                       qualified_predicate: str = None,
+                                       qualified_object_aspect: str = None,
+                                       qualified_object_direction: str = None) -> TripleEvaluationResult:
         """Check a research triple with equivalent names against a list of PMIDs.
         
         Args:
@@ -83,6 +112,9 @@ class TripleEvaluatorSystem:
             subject_names: List of equivalent names for the subject
             object_names: List of equivalent names for the object
             pmids: List of PubMed identifiers
+            qualified_predicate: Required qualified predicate (e.g., 'causes') if any qualifier is used
+            qualified_object_aspect: Optional aspect qualifier (e.g., 'activity_or_abundance') if any qualifier is used
+            qualified_object_direction: Optional direction qualifier (e.g., 'increased') if any qualifier is used
             
         Returns:
             TripleEvaluationResult with evaluation for each PMID
@@ -95,12 +127,17 @@ class TripleEvaluatorSystem:
             predicate=predicate, 
             object=object_,
             subject_names=subject_names or [subject],
-            object_names=object_names or [object_]
+            object_names=object_names or [object_],
+            qualified_predicate=qualified_predicate,
+            qualified_object_aspect=qualified_object_aspect,
+            qualified_object_direction=qualified_object_direction
         )
         
         # Log equivalent names
         logger.info(f"Subject equivalent names: {triple.subject_names}")
         logger.info(f"Object equivalent names: {triple.object_names}")
+        if triple.has_qualifiers():
+            logger.info(f"Qualifiers - predicate: {triple.qualified_predicate}, aspect: {triple.qualified_object_aspect}, direction: {triple.qualified_object_direction}")
         
         # Step 1: Extract abstracts from PMIDs
         logger.info("Extracting abstracts from PMIDs...")
@@ -117,9 +154,11 @@ class TripleEvaluatorSystem:
                 evaluations.append(TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="not_supported",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning="PMID not found in results"
+                    reasoning="PMID not found in results",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
                 
@@ -129,9 +168,11 @@ class TripleEvaluatorSystem:
                 evaluations.append(TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="dont_know",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning=f"Error: {data.error}"
+                    reasoning=f"Error: {data.error}",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
             
@@ -140,9 +181,11 @@ class TripleEvaluatorSystem:
                 evaluations.append(TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="not_supported",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning="No abstract available"
+                    reasoning="No abstract available",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
             
@@ -170,9 +213,11 @@ class TripleEvaluatorSystem:
                     evaluations.append(TripleEvaluation(
                         pmid=pmid,
                         is_supported=False,
+                        evidence_category="dont_know",
                         supporting_sentence=None,
-                        confidence=0.0,
-                        reasoning=f"Evaluation failed: {str(e)}"
+                        reasoning=f"Evaluation failed: {str(e)}",
+                        subject_mentioned=False,
+                        object_mentioned=False
                     ))
         
         # Sort evaluations by PMID to maintain order
@@ -185,8 +230,8 @@ class TripleEvaluatorSystem:
         """Apply validation rules to ensure logical consistency in evaluation results.
         
         Rules:
-        1. If confidence > 0.8 AND supporting_sentence provided, then is_supported MUST be true
-        2. If supporting_sentence cannot be provided (null/empty), set confidence to 0.0 and is_supported MUST be false
+        1. If evidence_category is "not_supported", then supporting_sentence MUST be None
+        2. If no supporting_sentence for categories that should have one, adjust reasoning
         
         Args:
             evaluation: The original evaluation result
@@ -195,22 +240,22 @@ class TripleEvaluatorSystem:
         Returns:
             Corrected evaluation result
         """
-        # Rule 1: High confidence + supporting sentence = must be supported
-        if (evaluation.confidence > 0.8 and 
-            evaluation.supporting_sentence and 
-            evaluation.supporting_sentence.strip() and
-            not evaluation.is_supported):
-            
+        # Rule 1: Direct evidence and related_not_direct must be supported
+        if (evaluation.evidence_category in ["direct_evidence", "related_not_direct"] and not evaluation.is_supported):
             evaluation.is_supported = True
-            evaluation.reasoning += " [Auto-corrected: High confidence with supporting evidence]"
+            evaluation.reasoning += " [Auto-corrected: Direct evidence and related evidence are both supported]"
         
-        # Rule 2: Only force false when no supporting evidence
+        # Rule 2: Categories that shouldn't have supporting sentences
+        if evaluation.evidence_category in ["not_supported", "dont_know", "opposite_assertion"]:
+            if evaluation.supporting_sentence:
+                evaluation.supporting_sentence = None
+                evaluation.reasoning += " [Auto-corrected: Category doesn't require supporting sentence]"
+        
+        # Rule 3: Ensure consistency for unsupported cases
         if not evaluation.supporting_sentence or not evaluation.supporting_sentence.strip():
-            
-            evaluation.is_supported = False
-            evaluation.supporting_sentence = None
-            evaluation.confidence = 0.0
-            evaluation.reasoning += " [Auto-corrected: No supporting evidence]"
+            if evaluation.evidence_category in ["direct_evidence", "related_not_direct"]:
+                evaluation.supporting_sentence = None
+                evaluation.reasoning += " [Auto-corrected: No supporting evidence]"
         
         return evaluation
     

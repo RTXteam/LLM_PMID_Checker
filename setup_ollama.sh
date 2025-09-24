@@ -6,9 +6,9 @@ set -e
 
 # Configuration
 PRIMARY_PORT=11434
-PRIMARY_GPU=0
-PROJECT_DIR="~/work/llm_pmid_support"
-OLLAMA_DIR="~/.ollama_pmid"
+PRIMARY_GPU=3
+PROJECT_DIR=~/work/llm_pmid_support
+OLLAMA_DIR=~/.ollama_pmid
 LOG_DIR="$PROJECT_DIR/logs"
 
 # Check if nvidia-smi is available

@@ -101,7 +101,10 @@ async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progre
             predicate=triple_data['predicate'],
             object=triple_data['object'],
             subject_names=triple_data.get('subject_names'),
-            object_names=triple_data.get('object_names')
+            object_names=triple_data.get('object_names'),
+            qualified_predicate=triple_data.get('qualified_predicate'),
+            qualified_object_aspect=triple_data.get('qualified_object_aspect'),
+            qualified_object_direction=triple_data.get('qualified_object_direction')
         )
         
         evaluations = []
@@ -111,34 +114,40 @@ async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progre
             data = abstract_data.get(pmid)
             if not data:
                 # PMID not found in results
-                evaluations.append(TripleEvaluation(
+                evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="not_supported",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning="PMID not found in results"
+                    reasoning="PMID not found in results",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
                 
             if data.error:
                 # Error extracting abstract
-                evaluations.append(TripleEvaluation(
+                evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="dont_know",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning=f"Error: {data.error}"
+                    reasoning=f"Error: {data.error}",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
             
             if not data.abstract.strip():
                 # No abstract available
-                evaluations.append(TripleEvaluation(
+                evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="not_supported",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning="No abstract available"
+                    reasoning="No abstract available",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
                 continue
             
@@ -160,12 +169,14 @@ async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progre
                 evaluations.append(evaluation)
                 
             except Exception as e:
-                evaluations.append(TripleEvaluation(
+                evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
+                    evidence_category="dont_know",
                     supporting_sentence=None,
-                    confidence=0.0,
-                    reasoning=f"Evaluation failed: {str(e)}"
+                    reasoning=f"Evaluation failed: {str(e)}",
+                    subject_mentioned=False,
+                    object_mentioned=False
                 ))
         
         if progress_callback:
@@ -190,10 +201,26 @@ def create_results_dataframe(result: TripleEvaluationResult) -> pd.DataFrame:
     """Create a pandas DataFrame from evaluation results."""
     data = []
     for eval_result in result.evaluations:
+        # Map evidence categories to display formats
+        category_map = {
+            "direct_evidence": "Direct evidence",
+            "opposite_assertion": "Opposite Assertion",
+            "related_not_direct": "Related (Not Direct)",
+            "not_supported": "Not mentioned or not related",
+            "dont_know": "Unknown"
+        }
+        category_display = category_map.get(eval_result.evidence_category, "Unknown")
+        
+        # Update supported logic: direct_evidence and related_not_direct are both supported
+        is_supported = eval_result.evidence_category in ["direct_evidence", "related_not_direct"]
+        
+        # Reorder columns as requested: PMID, Supported, Short Explanation, Subject Mentioned, Object Mentioned, Supporting Sentence
         data.append({
-            'PMID': f"https://pubmed.ncbi.nlm.nih.gov/{eval_result.pmid}",
-            'Supported': eval_result.is_supported,
-            'Confidence': eval_result.confidence,
+            'PMID': f"https://pubmed.ncbi.nlm.nih.gov/{eval_result.pmid}",  # Full URL for linking
+            'Supported': is_supported,
+            'Short Explanation': category_display,
+            'Subject Mentioned': "Yes" if eval_result.subject_mentioned else "No",
+            'Object Mentioned': "Yes" if eval_result.object_mentioned else "No",
             'Supporting Sentence': eval_result.supporting_sentence or ''
         })
     return pd.DataFrame(data)
@@ -215,289 +242,7 @@ def create_summary_charts(df: pd.DataFrame):
     fig_pie.update_traces(textposition='inside', textinfo='percent+label')
     st.plotly_chart(fig_pie)
 
-def main():
-    """Main Streamlit application."""
-    st.title("🧬 LLM PMID Checker System")
-    st.markdown("""
-    Check whether research triples are supported by PubMed abstracts using large language models with **enhanced semantic understanding**.
-    
-    **How it works:**
-    1. **Choose input format**: Entity names (with automatic normalization) or direct CURIEs
-    2. **Enter a research triple** (e.g., *SIX1 affects Cell Proliferation* or *NCBIGene:6495 affects UMLS:C0596290*)
-    3. **Entity normalization**: System automatically finds equivalent names and synonyms
-    4. **Provide PubMed IDs** to evaluate against
-    5. **Choose an AI model** for evaluation with enriched semantic context
-    6. **Get enhanced results** with confidence scores, supporting evidence, and semantic insights
-    
-    **🆕 New Features:**
-    - **Dual Input Modes**: Support for both entity names and semantic identifiers (CURIEs)
-    - **Automatic Normalization**: Finds equivalent names using ARAX and SRI Node Normalization APIs
-    - **Enhanced AI Evaluation**: LLM considers all equivalent names for better accuracy
-    """)
-    
-    # Display environment status
-    display_environment_status()
-    
-    # Main interface
-    with st.container():
-        st.header("📝 Input Parameters")
-        
-        # Triple input
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            subject = st.text_input("Subject", value="SIX1", help="The subject of the research triple")
-        with col2:
-            predicate = st.text_input("Predicate", value="affects", help="The relationship/action")
-        with col3:
-            object_ = st.text_input("Object", value="Cell Proliferation", help="The object of the research triple")
-        
-        # PMID input options
-        st.subheader("📄 PMID Input")
-        
-        pmid_input_method = st.radio(
-            "Choose input method:",
-            ["Manual Entry", "File Upload"],
-            horizontal=True
-        )
-        
-        pmids = []
-        
-        if pmid_input_method == "Manual Entry":
-            pmid_text = st.text_area(
-                "Enter PMIDs (space, comma, or newline separated)",
-                value="34513929, 16488997, 14695375, 23613228, 34561318, 28473774, 26175950",
-                height=100,
-                help="Enter PubMed IDs separated by spaces, commas, or newlines"
-            )
-            
-            if pmid_text.strip():
-                # Parse PMIDs from text - handle spaces, commas, and newlines
-                pmid_text = pmid_text.replace(',', ' ').replace('\n', ' ')
-                pmids = [pmid.strip() for pmid in pmid_text.split() if pmid.strip()]
-        
-        else:  # File Upload
-            uploaded_file = st.file_uploader(
-                "Upload PMIDs file",
-                type=['txt'],
-                help="Upload a text file with one PMID per line"
-            )
-            
-            if uploaded_file is not None:
-                pmids = [line.decode('utf-8').strip() for line in uploaded_file.readlines() if line.decode('utf-8').strip()]
-        
-        # Display parsed PMIDs
-        if pmids:
-            st.info(f"📊 Found {len(pmids)} PMIDs: {', '.join(pmids[:10])}{' ...' if len(pmids) > 10 else ''}")
-        
-        # Model selection
-        st.subheader("🤖 Model Selection")
-        model = st.selectbox(
-            "Choose AI Model",
-            options=["hermes4", "gpt-oss"],
-            index=0,
-            help="Select the language model for evaluation"
-        )
-        
-        # Model info
-        model_info = {
-            "hermes4": "Hermes 4 70B (Q4_K_XL) - Latest model with hybrid reasoning, ~42GB VRAM",
-            "gpt-oss": "GPT-OSS 120B - Requires ~65GB VRAM, higher accuracy but slower"
-        }
-        st.info(f"ℹ️ {model_info[model]}")
-        
-        # Evaluation button
-        st.divider()
-        
-        if st.button("🔬 Start Evaluation", type="primary", disabled=not (subject and predicate and object_ and pmids)):
-            if not subject or not predicate or not object_:
-                st.error("Please provide all three parts of the triple (Subject, Predicate, Object)")
-                return
-            
-            if not pmids:
-                st.error("Please provide at least one PMID")
-                return
-            
-            # Check environment
-            env_status = check_environment()
-            if env_status["missing_vars"]:
-                st.error(f"Missing required environment variables: {', '.join(env_status['missing_vars'])}")
-                st.info("Please configure your .env file as shown in the sidebar")
-                return
-            
-            # Create enriched triple data with normalization
-            normalization_client = NodeNormalizationClient()
-            subject_names = normalization_client.get_equivalent_names(name=subject) or [subject]
-            object_names = normalization_client.get_equivalent_names(name=object_) or [object_]
-            
-            triple_data = {
-                'subject': subject,
-                'predicate': predicate,
-                'object': object_,
-                'subject_names': subject_names,
-                'object_names': object_names
-            }
-            
-            with st.spinner(f"🔍 Checking triple **{subject} {predicate} {object_}** against {len(pmids)} PMIDs..."):
-                try:
-                    # Run async evaluation with enriched data
-                    result = asyncio.run(run_evaluation(triple_data, pmids, model))
-                    
-                    # Store results in session state
-                    st.session_state.last_result = result
-                    st.session_state.last_triple = [subject, predicate, object_]
-                    st.session_state.last_model = model
-                    
-                except Exception as e:
-                    st.error(f"❌ Evaluation failed: {str(e)}")
-                    st.info("Make sure Ollama is running and the model is available")
-                    return
-    
-    # Display results if available
-    if hasattr(st.session_state, 'last_result') and st.session_state.last_result:
-        st.divider()
-        display_results(st.session_state.last_result, st.session_state.last_triple, st.session_state.last_model)
 
-def display_results(result: TripleEvaluationResult, triple: List[str], model: str):
-    """Display evaluation results with visualizations."""
-    st.header("📊 Evaluation Results")
-    
-    # Summary metrics
-    summary = result.get_summary()
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total PMIDs", summary['total_pmids'])
-    with col2:
-        st.metric("Supported", summary['supported_pmids'], f"{summary['supported_percentage']}%")
-    with col3:
-        st.metric("Not Supported", summary['unsupported_pmids'], f"{summary['unsupported_percentage']}%")
-    with col4:
-        avg_confidence = pd.DataFrame([
-            {'confidence': eval_result.confidence} 
-            for eval_result in result.evaluations 
-            if eval_result.is_supported
-        ])['confidence'].mean() if result.evaluations else 0
-        st.metric("Avg Confidence", f"{avg_confidence:.2f}" if not pd.isna(avg_confidence) else "N/A")
-    
-    # Create DataFrame for detailed results
-    df = create_results_dataframe(result)
-    
-    # Charts
-    if not df.empty:
-        create_summary_charts(df)
-    
-    # Detailed results table
-    st.subheader("📋 Detailed Results")
-    
-    # Add filters
-    col1, col2 = st.columns(2)
-    with col1:
-        show_supported = st.checkbox("Show Supported", value=True)
-    with col2:
-        show_not_supported = st.checkbox("Show Not Supported", value=True)
-    
-            # Filter dataframe
-        filtered_df = df.copy()
-        if not show_supported:
-            filtered_df = filtered_df[~filtered_df['Supported']]
-        if not show_not_supported:
-            filtered_df = filtered_df[filtered_df['Supported']]
-    
-    # Display filtered results
-    if not filtered_df.empty:
-        # Style the dataframe
-        def style_row(row):
-            if row['Supported']:
-                return ['background-color: #e8f5e8'] * len(row)
-            else:
-                return ['background-color: #fde8e8'] * len(row)
-        
-        styled_df = filtered_df.style.apply(style_row, axis=1)
-        st.dataframe(styled_df, height=400)
-        
-        # Export options
-        st.subheader("📥 Export Results")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            # Download as CSV
-            csv = filtered_df.to_csv(index=False)
-            st.download_button(
-                label="📄 Download CSV",
-                data=csv,
-                file_name=f"triple_evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-        
-        with col2:
-            # Download as JSON
-            json_data = {
-                "triple": {
-                    "subject": triple[0],
-                    "predicate": triple[1],
-                    "object": triple[2]
-                },
-                "model": model,
-                "timestamp": datetime.now().isoformat(),
-                "summary": summary,
-                "evaluations": [
-                    {
-                        "pmid": eval_result.pmid,
-                        "is_supported": eval_result.is_supported,
-                        "confidence": eval_result.confidence,
-                        "supporting_sentence": eval_result.supporting_sentence
-                    }
-                    for eval_result in result.evaluations
-                ]
-            }
-            
-            st.download_button(
-                label="📋 Download JSON",
-                data=json.dumps(json_data, indent=2),
-                file_name=f"triple_evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
-        
-        with col3:
-            # Copy CLI format
-            cli_output = result.format_output()
-            st.download_button(
-                label="🖥️ Download CLI Format",
-                data=cli_output,
-                file_name=f"triple_evaluation_cli_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain"
-            )
-    
-    else:
-        st.warning("No results match the current filters.")
-    
-    # Detailed view for each evaluation
-    st.subheader("🔍 Detailed Evaluation")
-    
-    # Select PMID for detailed view
-    pmids_for_detail = [eval_result.pmid for eval_result in result.evaluations]
-    selected_pmid = st.selectbox("Select PMID for detailed view:", pmids_for_detail)
-    
-    if selected_pmid:
-        selected_eval = next((eval_result for eval_result in result.evaluations if eval_result.pmid == selected_pmid), None)
-        if selected_eval:
-            col1, col2 = st.columns([1, 2])
-            
-            with col1:
-                st.write("**PMID:**", selected_eval.pmid)
-                st.write("**Supported:**", "✅ Yes" if selected_eval.is_supported else "❌ No")
-                st.write("**Confidence:**", f"{selected_eval.confidence:.2f}")
-                
-                # Link to PubMed
-                st.markdown(f"[📖 View on PubMed](https://pubmed.ncbi.nlm.nih.gov/{selected_eval.pmid})")
-            
-            with col2:
-                st.write("**Most Likely Supporting Sentence:**")
-                if selected_eval.supporting_sentence:
-                    st.success(selected_eval.supporting_sentence)
-                else:
-                    st.write("_No supporting sentence provided_")
 
 def run_app():
     """Main Streamlit app."""
@@ -536,16 +281,57 @@ def main_container():
     col1, col2, col3 = st.columns([2, 1, 2])
     with col1:
         if input_mode == "Entity Names (with normalization)":
-            subject = st.text_input("Subject", value="SIX1", help="Gene/protein name (will be normalized)")
+            subject = st.text_input("Subject", value="SIX1", help="Gene/protein name (will be normalized)", key="entity_subject")
         else:
-            subject = st.text_input("Subject CURIE", value="NCBIGene:6495", help="Subject CURIE (e.g., NCBIGene:6495)")
+            subject = st.text_input("Subject CURIE", value="NCBIGene:6495", help="Subject CURIE (e.g., NCBIGene:6495)", key="curie_subject")
     with col2:
-        predicate = st.text_input("Predicate", value="affects", help="The relationship or action")
+        predicate = st.text_input("Predicate", value="affects", help="The relationship or action", key="predicate_input")
     with col3:
         if input_mode == "Entity Names (with normalization)":
-            object_ = st.text_input("Object", value="Cell Proliferation", help="Process/condition name (will be normalized)")
+            object_ = st.text_input("Object", value="Cell Proliferation", help="Process/condition name (will be normalized)", key="entity_object")
         else:
-            object_ = st.text_input("Object CURIE", value="UMLS:C0596290", help="Object CURIE (e.g., UMLS:C0596290)")
+            object_ = st.text_input("Object CURIE", value="UMLS:C0596290", help="Object CURIE (e.g., UMLS:C0596290)", key="curie_object")
+    
+    # Qualifier inputs section
+    st.subheader("🔍 Optional Qualifiers")
+    st.markdown("Add qualifiers to make the relationship more specific")
+    
+    with st.expander("Add Qualifiers", expanded=False):
+        qualifier_col1, qualifier_col2, qualifier_col3 = st.columns(3)
+        with qualifier_col1:
+            qualified_predicate = st.text_input("Qualified Predicate", 
+                                               value="", 
+                                               help="More specific relationship (e.g., 'causes', 'regulates'). Required if using any qualifiers.",
+                                               key="new_qualified_predicate")
+        with qualifier_col2:
+            qualified_object_aspect = st.text_input("Object Aspect", 
+                                                   value="", 
+                                                   help="Aspect of the object (e.g., 'activity', 'abundance', 'activity_or_abundance')",
+                                                   key="new_qualified_object_aspect")
+        with qualifier_col3:
+            qualified_object_direction = st.text_input("Direction", 
+                                                      value="", 
+                                                      help="Direction of change (e.g., 'increased', 'decreased', 'upregulated')",
+                                                      key="new_qualified_object_direction")
+        
+        # Qualifier validation message for new interface
+        has_any_qualifier = any([qualified_predicate.strip(), qualified_object_aspect.strip(), qualified_object_direction.strip()])
+        if has_any_qualifier:
+            if not qualified_predicate.strip():
+                st.error("⚠️ Qualified Predicate is required when using any qualifiers")
+            elif not qualified_object_aspect.strip() and not qualified_object_direction.strip():
+                st.error("⚠️ At least one of Object Aspect or Direction must be provided when using qualifiers")
+            else:
+                # Build and show the qualified triple
+                qualified_parts = []
+                if qualified_object_direction.strip():
+                    qualified_parts.append(qualified_object_direction.strip())
+                if qualified_object_aspect.strip():
+                    qualified_parts.append(qualified_object_aspect.strip())
+                
+                qualified_description = " ".join(qualified_parts)
+                qualified_triple_str = f"'{subject}' {qualified_predicate.strip()} {qualified_description} of '{object_}'"
+                st.success(f"✅ Qualified Triple: **{qualified_triple_str}**")
     
     # Initialize triple data structure
     triple_data = None
@@ -594,7 +380,10 @@ def main_container():
                     'predicate': predicate,
                     'object': object_,
                     'subject_names': subject_names,
-                    'object_names': object_names
+                    'object_names': object_names,
+                    'qualified_predicate': qualified_predicate.strip() if qualified_predicate.strip() else None,
+                    'qualified_object_aspect': qualified_object_aspect.strip() if qualified_object_aspect.strip() else None,
+                    'qualified_object_direction': qualified_object_direction.strip() if qualified_object_direction.strip() else None
                 }
         else:
             # CURIE mode - get equivalent names from CURIEs
@@ -643,7 +432,10 @@ def main_container():
                     'predicate': predicate,
                     'object': primary_object,
                     'subject_names': subject_names,
-                    'object_names': object_names
+                    'object_names': object_names,
+                    'qualified_predicate': qualified_predicate.strip() if qualified_predicate.strip() else None,
+                    'qualified_object_aspect': qualified_object_aspect.strip() if qualified_object_aspect.strip() else None,
+                    'qualified_object_direction': qualified_object_direction.strip() if qualified_object_direction.strip() else None
                 }
     
     st.divider()
@@ -718,7 +510,12 @@ def main_container():
     st.divider()
     
     # Evaluation section
-    can_evaluate = triple_data is not None and pmids
+    qualifiers_valid = True
+    if has_any_qualifier:
+        qualifiers_valid = (qualified_predicate.strip() and 
+                          (qualified_object_aspect.strip() or qualified_object_direction.strip()))
+    
+    can_evaluate = triple_data is not None and pmids and qualifiers_valid
     
     if can_evaluate:
         if st.button("🚀 Start Check", type="primary"):
@@ -813,10 +610,9 @@ def display_evaluation_results():
         with metric_row2_col1:
             st.metric("❌ Not Supported", summary['unsupported_pmids'], delta=f"{summary['unsupported_percentage']}%")
         with metric_row2_col2:
-            # Calculate average confidence for supported PMIDs
-            supported_evals = [e for e in result.evaluations if e.is_supported]
-            avg_conf = sum(e.confidence for e in supported_evals) / len(supported_evals) if supported_evals else 0
-            st.metric("Avg Confidence", f"{avg_conf:.2f}")
+            # Count direct evidence PMIDs
+            direct_evidence_count = len([e for e in result.evaluations if e.evidence_category == "direct_evidence"])
+            st.metric("🎯 Direct Evidence", direct_evidence_count)
     
     with chart_col:
         # Create and display pie chart
@@ -854,12 +650,18 @@ def display_results_table(df: pd.DataFrame, view_type: str):
         st.info("No results to display.")
         return
     
-    # Configure columns
+    # Configure columns with tooltips
     column_config = {
-        'PMID': st.column_config.LinkColumn('PMID', help="PubMed ID - Click to view on PubMed", display_text="https://pubmed.ncbi.nlm.nih.gov/(.+)"),
-        'Supported': st.column_config.CheckboxColumn('Supported', help="Whether the triple is supported"),
-        'Confidence': st.column_config.ProgressColumn('Confidence', help="Confidence score", min_value=0, max_value=1),
-        'Most Likely Supporting Sentence': st.column_config.TextColumn('Most Likely Supporting Sentence', help="Key supporting sentence from abstract", width="large")
+        'PMID': st.column_config.LinkColumn(
+            'PMID', 
+            help="PubMed ID - Click to view the full article on PubMed",
+            display_text=r"https://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)"
+        ),
+        'Supported': st.column_config.CheckboxColumn('Supported', help="Whether the triple relationship is supported by the evidence (Direct Evidence and Related count as supported)"),
+        'Short Explanation': st.column_config.TextColumn('Short Explanation', help="Evidence strength category: Direct evidence = strong evidence, Related (Not Direct) = relevant but incomplete evidence, Not mentioned or not related = not supported, Opposite Assertion = contradictory evidence, Unknown = ambiguous"),
+        'Subject Mentioned': st.column_config.TextColumn('Subject Mentioned', help="Whether the subject entity (or its equivalent names) is mentioned anywhere in the abstract"),
+        'Object Mentioned': st.column_config.TextColumn('Object Mentioned', help="Whether the object entity (or its equivalent names) is mentioned anywhere in the abstract"),
+        'Supporting Sentence': st.column_config.TextColumn('Supporting Sentence', help="The most relevant sentence from the abstract that supports the relationship (only shown for Direct Evidence and Related categories)", width="large")
     }
     
     # Display with styling
@@ -902,8 +704,10 @@ def export_results(result: TripleEvaluationResult, triple: List[str], model: str
                 {
                     "pmid": e.pmid,
                     "is_supported": e.is_supported,
-                    "confidence": e.confidence,
-                    "supporting_sentence": e.supporting_sentence
+                    "evidence_category": e.evidence_category,
+                    "supporting_sentence": e.supporting_sentence,
+                    "subject_mentioned": e.subject_mentioned,
+                    "object_mentioned": e.object_mentioned
                 }
                 for e in result.evaluations
             ]

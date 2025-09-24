@@ -90,9 +90,11 @@ class OllamaClient:
         # Default values
         result = {
             "is_supported": False,
-            "confidence": 0.0,
+            "evidence_category": "dont_know",
             "supporting_sentence": None,
-            "reasoning": "Manual extraction fallback"
+            "reasoning": "Manual extraction fallback",
+            "subject_mentioned": False,
+            "object_mentioned": False
         }
         
         # Extract is_supported
@@ -100,13 +102,11 @@ class OllamaClient:
         if supported_match:
             result["is_supported"] = supported_match.group(1).lower() == 'true'
         
-        # Extract confidence
-        confidence_match = re.search(r'"confidence":\s*([0-9]*\.?[0-9]+)', content)
-        if confidence_match:
-            try:
-                result["confidence"] = float(confidence_match.group(1))
-            except ValueError:
-                result["confidence"] = 0.0
+        # Extract evidence_category
+        category_match = re.search(r'"evidence_category":\s*"([^"]*)"', content)
+        if category_match:
+            result["evidence_category"] = category_match.group(1)
+        
         
         # Extract supporting_sentence (handle quotes carefully)
         sentence_match = re.search(r'"supporting_sentence":\s*"([^"]*(?:\\.[^"]*)*)"', content)
@@ -121,6 +121,16 @@ class OllamaClient:
             # Unescape any escaped quotes
             reasoning = reasoning_match.group(1).replace('\\"', '"')
             result["reasoning"] = reasoning if reasoning.strip() else "Manual extraction"
+        
+        # Extract subject_mentioned
+        subject_mentioned_match = re.search(r'"subject_mentioned":\s*(true|false)', content, re.IGNORECASE)
+        if subject_mentioned_match:
+            result["subject_mentioned"] = subject_mentioned_match.group(1).lower() == 'true'
+        
+        # Extract object_mentioned
+        object_mentioned_match = re.search(r'"object_mentioned":\s*(true|false)', content, re.IGNORECASE)
+        if object_mentioned_match:
+            result["object_mentioned"] = object_mentioned_match.group(1).lower() == 'true'
         
         return result
 
@@ -143,7 +153,7 @@ class OllamaClient:
                     "temperature": 0.1,
                     "top_p": 0.95 if "hermes4" in self.model else 0.9,
                     "top_k": 20 if "hermes4" in self.model else -1,
-                    "num_predict": 500
+                    "num_predict": 800
                 }
             )
             
@@ -172,16 +182,34 @@ class OllamaClient:
             obj = triple.object
             subject_names = getattr(triple, 'subject_names', [subject])
             object_names = getattr(triple, 'object_names', [obj])
+            # Get qualifier information
+            qualified_predicate = getattr(triple, 'qualified_predicate', None)
+            qualified_object_aspect = getattr(triple, 'qualified_object_aspect', None)
+            qualified_object_direction = getattr(triple, 'qualified_object_direction', None)
+            has_qualifiers = getattr(triple, 'has_qualifiers', lambda: False)()
         else:
             subject, predicate, obj = triple
             subject_names = [subject]
             object_names = [obj]
+            qualified_predicate = None
+            qualified_object_aspect = None
+            qualified_object_direction = None
+            has_qualifiers = False
         
-        # Use reasoning mode for Hermes 4 for more accurate evaluations
-        reasoning_prompt = (
-            "You are a deep thinking AI with a strong understanding of medical and biological semantics. Use <think></think> tags to systematically reason through "
-            "the evaluation before providing your final JSON response.\n\n"
-        )
+        # Use model-specific prompting approaches
+        if "gpt-oss" in self.model.lower():
+            # GPT-OSS uses thinking field for reasoning, so we need explicit instructions for final output
+            reasoning_prompt = (
+                "You are a deep thinking AI with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
+                "IMPORTANT: After your analysis, you MUST provide a final JSON response in this exact format:\n"
+                "FINAL_ANSWER: {\"is_supported\": true/false, \"supporting_sentence\": \"quote\" or null, \"reasoning\": \"brief explanation\"}\n\n"
+            )
+        else:
+            # Hermes 4 and other models use <think></think> tags
+            reasoning_prompt = (
+                "You are a deep thinking AI with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
+                "Use <think></think> tags to systematically reason through the evaluation before providing your final JSON response.\n\n"
+            )
         
         # Build equivalent names sections
         subject_names_text = ""
@@ -192,12 +220,49 @@ class OllamaClient:
         if len(object_names) > 1:
             object_names_text = f"\nEquivalent names for '{obj}': {', '.join(object_names)}"
         
+        # Build the triple description based on whether qualifiers are present
+        if has_qualifiers:
+            # Build qualified description
+            qualified_parts = []
+            if qualified_object_direction:
+                qualified_parts.append(qualified_object_direction)
+            if qualified_object_aspect:
+                qualified_parts.append(qualified_object_aspect)
+            
+            qualified_description = " ".join(qualified_parts)
+            triple_description = f"'{subject}' {qualified_predicate} {qualified_description} of '{obj}'"
+            
+            # Add qualifier-specific guidance
+            qualifier_guidance = (
+                f"CRITICAL QUALIFIER EVALUATION:\n"
+                f"The relationship is qualified with:\n"
+                f"- Qualified predicate: {qualified_predicate}\n"
+                f"- Object aspect: {qualified_object_aspect or 'not specified'}\n"
+                f"- Direction: {qualified_object_direction or 'not specified'}\n\n"
+                f"STRICT REQUIREMENTS - ALL must be present for support:\n"
+                f"1. CAUSAL RELATIONSHIP: Must show '{qualified_predicate}' (not just correlation, association, or involvement)\n"
+                f"2. DIRECTION: Must explicitly show '{qualified_object_direction}' (not opposite direction or unclear)\n"
+                f"3. ASPECT: Must relate to '{qualified_object_aspect}' (activity/function OR abundance/levels)\n\n"
+                f"EVIDENCE STANDARDS:\n"
+                f"- 'Functions in' or 'involved in' = RELATED BUT NOT DIRECT (insufficient for causation)\n"
+                f"- Terms matching the requested direction '{qualified_object_direction}' = DIRECT EVIDENCE\n"
+                f"- Terms opposite to the requested direction '{qualified_object_direction}' = OPPOSITE ASSERTION\n"
+                f"- General involvement without clear direction = RELATED BUT NOT DIRECT\n\n"
+                f"DIRECTION MATCHING EXAMPLES:\n"
+                f"- If requesting 'increased': 'promotes', 'enhances', 'stimulates', 'increases', 'upregulates' = DIRECT EVIDENCE\n"
+                f"- If requesting 'increased': 'inhibits', 'reduces', 'decreases', 'suppresses', 'downregulates' = OPPOSITE ASSERTION\n"
+                f"- If requesting 'decreased': 'inhibits', 'reduces', 'decreases', 'suppresses', 'downregulates' = DIRECT EVIDENCE\n"
+                f"- If requesting 'decreased': 'promotes', 'enhances', 'stimulates', 'increases', 'upregulates' = OPPOSITE ASSERTION\n\n"
+            )
+        else:
+            triple_description = f"'{subject}' {predicate} '{obj}'"
+            qualifier_guidance = ""
+        
         prompt = (
             f"{reasoning_prompt}"
             f"CRITICAL LOGIC RULES:\n"
-            f"1. If confidence > 0.8 AND you provide a supporting_sentence, then is_supported MUST be true.\n"
-            f"2. If you CANNOT provide a supporting_sentence, set confidence to 0.0 and is_supported MUST be false.\n"
-            f"3. Be logically consistent - your confidence, supporting_sentence, and is_supported must align.\n\n"
+            f"1. If you CANNOT provide a supporting_sentence, is_supported MUST be false.\n"
+            f"2. Be logically consistent - your supporting_sentence and is_supported must align.\n\n"
             f"SEMANTIC UNDERSTANDING RULES:\n"
             f"1. Consider SEMANTIC RELATIONSHIPS, not just exact terminology matches\n"
             f"2. Related medical terms should be considered equivalent (e.g., 'congenital hemiplegia' and 'spastic hemiplegia')\n"
@@ -206,9 +271,10 @@ class OllamaClient:
             f"   - Similar principle applies to other relationships (look for equivalent expressions)\n"
             f"4. Medical conditions may be described using synonymous or closely related terms\n"
             f"5. Focus on the CONCEPTUAL relationship described, not exact word matching\n\n"
+            f"{qualifier_guidance}"
             f"EVALUATION TASK:\n"
             f"Given the following research abstract, determine if the triple "
-            f"'{subject}' {predicate} '{obj}' is supported by the content.\n"
+            f"{triple_description} is supported by the content.\n"
             f"{subject_names_text}"
             f"{object_names_text}\n\n"
             f"Pay special attention to:\n"
@@ -218,22 +284,84 @@ class OllamaClient:
             f"- Implicit relationships that are scientifically established\n\n"
             f"Abstract: {abstract}\n\n"
             f"Respond with ONLY a valid JSON object (use double quotes, not single quotes) containing:\n"
-            f"- \"is_supported\": boolean (true if supported, false otherwise)\n"
-            f"- \"confidence\": float (0.0 to 1.0, higher confidence means more likely to be supported)\n"
+            f"- \"is_supported\": boolean (true only if ALL qualifier requirements are met)\n"
+            f"- \"evidence_category\": string (one of: \"direct_evidence\", \"opposite_assertion\", \"related_not_direct\", \"not_supported\", \"dont_know\")\n"
             f"- \"supporting_sentence\": string (the most relevant sentence from the abstract, or null if not supported)\n"
-            f"- \"reasoning\": string (brief explanation of your semantic analysis)\n\n"
+            f"- \"reasoning\": string (detailed explanation including qualifier assessment)\n"
+            f"- \"subject_mentioned\": boolean (true if any equivalent name of the subject '{subject}' is mentioned in the abstract)\n"
+            f"- \"object_mentioned\": boolean (true if any equivalent name of the object '{obj}' is mentioned in the abstract)\n\n"
+            f"EVIDENCE CATEGORY DEFINITIONS:\n"
+            f"- \"direct_evidence\": Clear evidence supporting ALL aspects (causation + direction + aspect)\n"
+            f"- \"opposite_assertion\": Evidence showing opposite direction or contradictory relationship\n"
+            f"- \"related_not_direct\": Related to the topic but missing qualifier specificity\n"
+            f"- \"not_supported\": No relevant evidence found\n"
+            f"- \"dont_know\": Ambiguous or insufficient information to categorize\n\n"
             f"CRITICAL JSON FORMATTING RULES:\n"
             f"1. Use ONLY double quotes (\") for keys and string values\n"
             f"2. If text contains quotes, escape them with backslash (\\\")\n"
             f"3. Do not include any text before or after the JSON object\n"
             f"4. Ensure all strings are properly closed with matching quotes\n"
             f"5. Use null (not \"null\") for empty supporting_sentence\n\n"
-            f"Example: {{\"is_supported\": true, \"confidence\": 0.95, \"supporting_sentence\": \"The study shows X affects Y significantly.\", \"reasoning\": \"Clear causal relationship established.\"}}"
+            f"Example: {{\"is_supported\": true, \"supporting_sentence\": \"The study shows X affects Y significantly.\", \"reasoning\": \"Clear causal relationship established.\"}}"
         )
 
         try:
             response_data = await self.generate_response(prompt)
-            content = response_data["message"]["content"]
+            
+            # Handle both Pydantic objects (newer ollama) and dict format (older versions)
+            if hasattr(response_data, 'message'):
+                # Pydantic object format
+                message = response_data.message
+                content = message.content if hasattr(message, 'content') and message.content is not None else ""
+                thinking_content = message.thinking if hasattr(message, 'thinking') and message.thinking is not None else ""
+            else:
+                # Dictionary format (legacy)
+                message = response_data["message"]
+                content = message.get("content", "") or ""
+                thinking_content = message.get("thinking", "") or ""
+            
+            logger.debug(f"Content field: {content[:200]}...")
+            logger.debug(f"Thinking field: {thinking_content[:200]}...")
+            
+            # Handle FINAL_ANSWER: pattern in content (for GPT-OSS)
+            if "FINAL_ANSWER:" in content:
+                # Extract JSON after FINAL_ANSWER:
+                answer_start = content.find("FINAL_ANSWER:") + 13
+                json_part = content[answer_start:].strip()
+                content = json_part
+                logger.info("Found FINAL_ANSWER pattern in content field, extracted JSON")
+            
+            # Fallback: Handle models that put response in thinking field (legacy support)
+            elif not content.strip() and thinking_content:
+                logger.info("Using thinking field as model put response there instead of content field")
+                
+                # Look for FINAL_ANSWER: pattern in thinking content
+                if "FINAL_ANSWER:" in thinking_content:
+                    # Extract JSON after FINAL_ANSWER:
+                    answer_start = thinking_content.find("FINAL_ANSWER:") + 13
+                    json_part = thinking_content[answer_start:].strip()
+                    content = json_part
+                    logger.info("Found FINAL_ANSWER pattern in thinking field")
+                else:
+                    # Fallback: look for any JSON-like content in the thinking field
+                    content = thinking_content
+                    logger.debug(f"Thinking field content (first 500 chars): {thinking_content[:500]}")
+                    
+                    # If no JSON found in thinking, try to extract the decision and create JSON
+                    if '{' not in thinking_content:
+                        logger.warning("No JSON found in thinking field, attempting to create JSON from reasoning")
+                        # Try to determine if it's supported based on keywords in the reasoning
+                        is_supported = any(keyword in thinking_content.lower() for keyword in [
+                            'supported', 'supports', 'evidence', 'indicates', 'suggests', 'shows', 'demonstrates'
+                        ])
+                        # Create a basic JSON response
+                        content = f'{{"is_supported": {str(is_supported).lower()}, "supporting_sentence": null, "reasoning": "Based on model reasoning in thinking field"}}'
+                        logger.info(f"Created JSON from reasoning: {content}")
+            
+            # New fallback: If content is empty but we have thinking, try to use the thinking content directly
+            elif not content.strip() and not thinking_content.strip():
+                logger.error("Both content and thinking fields are empty")
+                raise ValueError("Model returned empty response in both content and thinking fields")
             
             # Handle Hermes 4 reasoning tags first
             if "</think>" in content:
@@ -251,12 +379,24 @@ class OllamaClient:
                 json_end = content.find("```", json_start)
                 json_str = content[json_start:json_end].strip()
             else:
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start != -1 and json_end != -1:
-                    json_str = content[json_start:json_end]
+                # Look for JSON object in content - handle multiline JSON
+                import re
+                # Find the first { and the last } that would complete a valid JSON object
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
                 else:
-                    raise ValueError("Could not find valid JSON in LLM response.")
+                    # Fallback to simple brace matching
+                    json_start = content.find('{')
+                    json_end = content.rfind('}') + 1
+                    if json_start != -1 and json_end > json_start and json_end != 0:
+                        json_str = content[json_start:json_end]
+                    else:
+                        logger.error(f"Could not find JSON braces in content. Content: {content[:1000]}")
+                        # If JSON is incomplete, try manual extraction
+                        logger.warning("Attempting manual extraction from incomplete JSON")
+                        evaluation = self._extract_json_manually(content)
+                        return evaluation
             
             # Clean and parse JSON
             if json_str:
@@ -297,7 +437,6 @@ class OllamaClient:
                 logger.error(f"Manual extraction also failed: {manual_error}")
                 return {
                     "is_supported": False,
-                    "confidence": 0.0,
                     "supporting_sentence": None,
                     "reasoning": f"LLM response not valid JSON: {content[:200]}..."
                 }
