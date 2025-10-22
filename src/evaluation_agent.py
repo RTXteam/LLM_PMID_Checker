@@ -10,7 +10,7 @@ class TripleEvaluation:
     """Result of triple check against an abstract."""
     pmid: str
     is_supported: bool
-    evidence_category: str = "dont_know"
+    evidence_category: str = "not_supported"
     supporting_sentence: Optional[str] = None
     reasoning: str = ""
     subject_mentioned: bool = False
@@ -78,26 +78,23 @@ class TripleData:
 class EvaluationAgent:
     """Agent for checking whether abstracts support research triples."""
     
-    def __init__(self, llm_provider):
+    def __init__(self, llm_client, checker_model=None):
         """Initialize the checking agent.
         
         Args:
-            llm_provider: LLM provider to use ('hermes4', 'gpt-oss')
+            llm_client: LLM client instance for generating evaluations
+            checker_model: Optional checker model for verification
         """
-        # Use factory to create appropriate LLM client
-        try:
-            from .llm_factory import create_llm_client
-            self.llm_client = create_llm_client(llm_provider)
-        except Exception as e:
-            logger.error(f"Failed to create LLM client: {e}")
-            logger.error("Please configure a valid LLM provider and ensure Ollama is running")
-            raise
+        self.llm_client = llm_client
+        self.checker_model = checker_model
+        logger.info("Evaluation agent initialized")
     
     async def evaluate_triple_against_abstract(self, 
                                              triple: TripleData, 
                                              abstract: str, 
                                              pmid: str,
-                                             title: str = "") -> TripleEvaluation:
+                                             title: str = "",
+                                             use_verification: bool = True) -> TripleEvaluation:
         """Check whether an abstract supports a research triple.
         
         Args:
@@ -105,6 +102,7 @@ class EvaluationAgent:
             abstract: The abstract text to analyze
             pmid: PubMed ID for the abstract
             title: Article title (optional)
+            use_verification: Whether to use checker model verification (default True)
             
         Returns:
             TripleEvaluation result
@@ -117,10 +115,20 @@ class EvaluationAgent:
                 abstract=abstract
             )
             
+            # Verify with checker model if verification is enabled
+            if use_verification and self.checker_model:
+                logger.info(f"Running verification check for PMID {pmid} using {self.checker_model}")
+                result = await self.llm_client.verify_evaluation(
+                    triple=triple,
+                    abstract=abstract,
+                    original_evaluation=result,
+                    checker_model=self.checker_model
+                )
+            
             return TripleEvaluation(
                 pmid=pmid,
                 is_supported=result["is_supported"],
-                evidence_category=result.get("evidence_category", "dont_know"),
+                evidence_category=result.get("evidence_category", "not_supported"),
                 supporting_sentence=result["supporting_sentence"],
                 reasoning=result["reasoning"],
                 subject_mentioned=result.get("subject_mentioned", False),
@@ -132,7 +140,7 @@ class EvaluationAgent:
             return TripleEvaluation(
                 pmid=pmid,
                 is_supported=False,
-                evidence_category="dont_know",
+                evidence_category="not_supported",
                 supporting_sentence=None,
                 reasoning=f"Evaluation failed: {str(e)}",
                 subject_mentioned=False,

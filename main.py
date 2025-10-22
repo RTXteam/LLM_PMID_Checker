@@ -23,15 +23,18 @@ async def main():
         epilog=        """
 Examples:
   # Basic triples using names (requires node normalization)
-  python main.py --model gpt-oss --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
-  python main.py --model hermes4 --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
+  python main.py --val_model gpt-oss:20b --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
+  python main.py --val_model hermes4:70b --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
   
   # Basic triples using CURIEs directly
-  python main.py --model gpt-oss --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --pmids 16186693 29083299
+  python main.py --val_model gpt-oss:20b --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --pmids 16186693 29083299
   
   # With qualifiers - must provide qualified_predicate and at least one of qualified_object_aspect/qualified_object_direction
-  python main.py --model hermes4 --triple_name "SIX1" "affects" "Cell Proliferation" --qualified_predicate "causes" --qualified_object_aspect "activity" --qualified_object_direction "increased" --pmids 16186693 29083299
-  python main.py --model gpt-oss --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --qualified_predicate "causes" --qualified_object_direction "upregulated" --pmids 16186693 29083299
+  python main.py --val_model hermes4:70b --triple_name "SIX1" "affects" "Cell Proliferation" --qualified_predicate "causes" --qualified_object_aspect "activity" --qualified_object_direction "increased" --pmids 16186693 29083299
+  python main.py --val_model gpt-oss:20b --triple_curie "NCBIGene:6495" "affects" "UMLS:C0596290" --qualified_predicate "causes" --qualified_object_direction "upregulated" --pmids 16186693 29083299
+  
+  # With verification
+  python main.py --val_model hermes4:70b --checker_model gpt-oss:20b --triple_name "SIX1" "affects" "Cell Proliferation" --pmids 16186693 29083299
         """
     )
     
@@ -77,10 +80,15 @@ Examples:
     )
     
     # Model selection (required)
-    parser.add_argument('--model', 
-                               choices=['hermes4', 'gpt-oss'],
-        help='LLM provider to use (hermes4 or gpt-oss)',
-                       required=True)
+    parser.add_argument('--val_model',
+                               type=str,
+                               default='hermes4:70b',
+                               help='Model for triple validation (e.g., hermes4:70b, gpt-oss:20b).')
+    
+    parser.add_argument('--checker_model',
+                               type=str,
+                               default=None,
+                               help='Model for verification/checking equivalent names. If not provided, verification is disabled.')
     
     # Optional arguments
     parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
@@ -90,6 +98,7 @@ Examples:
     
     # Set up logging
     setup_logging(args.verbose)
+    logger = logging.getLogger(__name__)
     
     # Validate qualifier constraints
     has_any_qualifier = any([
@@ -185,9 +194,28 @@ Examples:
     print("=" * 60)
     
     try:
+        # Determine which models to use
+        validation_model = args.val_model
+        
+        # Log model configuration
+        logger.info(f"Using validation model: {validation_model}")
+        if args.checker_model:
+            logger.info(f"Using checker model: {args.checker_model}")
+            logger.info(f"Verification enabled: True")
+        else:
+            logger.info(f"Verification disabled (no checker model provided)")
+        
+        print(f"Validation model: {validation_model}")
+        if args.checker_model:
+            print(f"Checker model: {args.checker_model}")
+        else:
+            print("Verification disabled")
+        print("=" * 60)
+        
         # Create evaluator system with specified model
         evaluator = TripleEvaluatorSystem(
-            llm_provider=args.model
+            llm_provider=validation_model,
+            checker_model=args.checker_model
         )
         
         # Run the evaluation with enriched triple data

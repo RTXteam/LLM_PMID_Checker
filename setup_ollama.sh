@@ -66,7 +66,7 @@ fi
 
 # Pull GPT-OSS models
 echo "Pulling GPT-OSS models..."
-OLLAMA_HOST=localhost:$PRIMARY_PORT ollama pull gpt-oss:120b || echo "GPT-OSS 120B not available, continuing..."
+OLLAMA_HOST=localhost:$PRIMARY_PORT ollama pull gpt-oss:20b || echo "GPT-OSS 20B not available, continuing..."
 
 # List available models
 echo ""

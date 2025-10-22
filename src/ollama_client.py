@@ -19,7 +19,7 @@ class OllamaClient:
         """Initialize Ollama client.
         
         Args:
-            model: Ollama model name (hermes4:70b, gpt-oss:120b, or any available Ollama model)
+            model: Ollama model name (hermes4:70b, gpt-oss:20b, or any available Ollama model)
             base_url: Ollama server URL
         """
         self.model = model
@@ -39,6 +39,8 @@ class OllamaClient:
         elif "gpt-oss" in model:
             if ":120b" in model:
                 logger.info("Using GPT-OSS 120B")
+            elif ":20b" in model:
+                logger.info("Using GPT-OSS 20B")
             else:
                 logger.info("Using GPT-OSS 20B")
 
@@ -90,7 +92,7 @@ class OllamaClient:
         # Default values
         result = {
             "is_supported": False,
-            "evidence_category": "dont_know",
+            "evidence_category": "not_supported",
             "supporting_sentence": None,
             "reasoning": "Manual extraction fallback",
             "subject_mentioned": False,
@@ -165,6 +167,32 @@ class OllamaClient:
             logger.error(f"Error calling Ollama API: {e}")
             raise
 
+    def _get_common_matching_rules(self) -> str:
+        """Returns common matching rules shared between evaluation and verification prompts."""
+        return (
+            "**MATCHING RULES**:\n"
+            "1. **Entity Matching**: Start with equivalent names from the provided lists above\n"
+            "   - You MAY use your knowledge to recognize common abbreviations and variants of the equivalent names (e.g., 'AAA' from 'AAA gene/protein')\n"
+            "   - BUT any alternative name you use MUST be clearly related to names in the provided list\n"
+            "2. **Relationship Matching**: Match by semantic meaning:\n"
+            "   - 'inhibits' = 'suppresses' = 'reduces' = 'blocks' = 'decreases activity/expression/abundance'\n"
+            "   - 'activates' = 'stimulates' = 'promotes' = 'increases' = 'upregulates' = 'enhances' = 'increases activity/expression/abundance'\n"
+            "   - 'expression', 'abundance', and 'levels' are interchangeable\n\n"
+            "**CRITICAL REQUIREMENTS**:\n"
+            "• Relationship MUST be between the SUBJECT and OBJECT from the triple\n"
+            "• Do NOT confuse relationships involving other entities\n"
+            "• SUPPORTING SENTENCE MUST EXPLICITLY MENTION BOTH SUBJECT and OBJECT (or EQUIVALENT NAMES)\n"
+            "**CRITICAL LOGIC RULES**:\n"
+            "1. **Correlation ≠ Causation**: 'A correlates with B' does NOT support 'A causes B'\n"
+            "2. **No Transitive Reasoning**: If X→A and X→B, does NOT mean A→B (must be direct)\n"
+            "3. **Opposite = Contradiction**: Inverse relationship → use 'opposite_assertion'\n"
+            "4. **Both Entities Required**: Supporting sentence must mention BOTH entities (names from the equivalent names list or via common abbreviations and variants of the equivalent names)\n\n"
+            "**CATEGORIES**:\n"
+            "• 'direct_support': Explicit causal/regulatory statement (e.g., 'X activates Y', 'X is a regulator of Y', 'X treatment increased Y')\n"
+            "• 'opposite_assertion': Direct relationship explicitly contradicts the triple\n"
+            "• 'not_supported': Missing entities, correlation only, transitive/indirect reasoning, or no evidence\n\n"
+        )
+
     async def evaluate_triple_support(self, triple: Union[List[str], 'TripleData'], abstract: str) -> Dict[str, Any]:
         """Evaluate if an abstract supports a given triple.
         
@@ -200,25 +228,28 @@ class OllamaClient:
         if "gpt-oss" in self.model.lower():
             # GPT-OSS uses thinking field for reasoning, so we need explicit instructions for final output
             reasoning_prompt = (
-                "You are a deep thinking AI with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
+                "You are an expert medical researcher with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
                 "IMPORTANT: After your analysis, you MUST provide a final JSON response in this exact format:\n"
                 "FINAL_ANSWER: {\"is_supported\": true/false, \"supporting_sentence\": \"quote\" or null, \"reasoning\": \"brief explanation\"}\n\n"
             )
         else:
             # Hermes 4 and other models use <think></think> tags
             reasoning_prompt = (
-                "You are a deep thinking AI with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
+                "You are an expert medical researcher with a strong understanding of medical and biological semantics. Analyze the abstract carefully and provide your final answer as a JSON object.\n\n"
                 "Use <think></think> tags to systematically reason through the evaluation before providing your final JSON response.\n\n"
             )
         
-        # Build equivalent names sections
-        subject_names_text = ""
-        if len(subject_names) > 1:
-            subject_names_text = f"\nEquivalent names for '{subject}': {', '.join(subject_names)}"
+        # Format them clearly so the LLM knows exactly what to check for
+        subject_names_list = subject_names if subject_names else [subject]
+        object_names_list = object_names if object_names else [obj]
         
-        object_names_text = ""
-        if len(object_names) > 1:
-            object_names_text = f"\nEquivalent names for '{obj}': {', '.join(object_names)}"
+        subject_names_text = f"\n**SUBJECT EQUIVALENT NAMES** (check for ANY of these + common abbreviations in the abstract):\n"
+        for i, name in enumerate(subject_names_list, 1):
+            subject_names_text += f"  {i}. {name}\n"
+        
+        object_names_text = f"\n**OBJECT EQUIVALENT NAMES** (check for ANY of these + common abbreviations in the abstract):\n"
+        for i, name in enumerate(object_names_list, 1):
+            object_names_text += f"  {i}. {name}\n"
         
         # Build the triple description based on whether qualifiers are present
         if has_qualifiers:
@@ -233,26 +264,25 @@ class OllamaClient:
             triple_description = f"'{subject}' {qualified_predicate} {qualified_description} of '{obj}'"
             
             # Add qualifier-specific guidance
+            # Build list of provided qualifiers for clearer instructions
+            provided_qualifiers = [f"predicate '{qualified_predicate}'"]
+            if qualified_object_direction:
+                provided_qualifiers.append(f"direction '{qualified_object_direction}'")
+            if qualified_object_aspect:
+                provided_qualifiers.append(f"aspect '{qualified_object_aspect}'")
+            
             qualifier_guidance = (
-                f"CRITICAL QUALIFIER EVALUATION:\n"
-                f"The relationship is qualified with:\n"
-                f"- Qualified predicate: {qualified_predicate}\n"
-                f"- Object aspect: {qualified_object_aspect or 'not specified'}\n"
-                f"- Direction: {qualified_object_direction or 'not specified'}\n\n"
-                f"STRICT REQUIREMENTS - ALL must be present for support:\n"
-                f"1. CAUSAL RELATIONSHIP: Must show '{qualified_predicate}' (not just correlation, association, or involvement)\n"
-                f"2. DIRECTION: Must explicitly show '{qualified_object_direction}' (not opposite direction or unclear)\n"
-                f"3. ASPECT: Must relate to '{qualified_object_aspect}' (activity/function OR abundance/levels)\n\n"
-                f"EVIDENCE STANDARDS:\n"
-                f"- 'Functions in' or 'involved in' = RELATED BUT NOT DIRECT (insufficient for causation)\n"
-                f"- Terms matching the requested direction '{qualified_object_direction}' = DIRECT EVIDENCE\n"
-                f"- Terms opposite to the requested direction '{qualified_object_direction}' = OPPOSITE ASSERTION\n"
-                f"- General involvement without clear direction = RELATED BUT NOT DIRECT\n\n"
-                f"DIRECTION MATCHING EXAMPLES:\n"
-                f"- If requesting 'increased': 'promotes', 'enhances', 'stimulates', 'increases', 'upregulates' = DIRECT EVIDENCE\n"
-                f"- If requesting 'increased': 'inhibits', 'reduces', 'decreases', 'suppresses', 'downregulates' = OPPOSITE ASSERTION\n"
-                f"- If requesting 'decreased': 'inhibits', 'reduces', 'decreases', 'suppresses', 'downregulates' = DIRECT EVIDENCE\n"
-                f"- If requesting 'decreased': 'promotes', 'enhances', 'stimulates', 'increases', 'upregulates' = OPPOSITE ASSERTION\n\n"
+                f"**QUALIFIERS TO CHECK**:\n"
+                f"- Predicate: {qualified_predicate}\n"
+                f"- Direction: {qualified_object_direction or 'any'}\n"
+                f"- Aspect: {qualified_object_aspect or 'any'}\n\n"
+                f"**QUALIFIER MATCHING**:\n"
+                f"• If direction='{qualified_object_direction}': Abstract must show {qualified_object_direction} effect (e.g., {'increases/activates/upregulates' if qualified_object_direction=='increased' else 'decreases/inhibits/downregulates' if qualified_object_direction=='decreased' else qualified_object_direction})\n"
+                f"• If aspect='activity_or_abundance': Abstract can mention activity OR abundance OR both (any one is sufficient)\n"
+                f"• Match semantic meaning: 'inhibitor' = 'causes decreased activity', 'upregulates expression' = 'causes increased abundance'\n\n"
+                f"**CATEGORIES**:\n"
+                f"• 'wrong_qualifier': Direction conflicts (e.g., abstract says increases but qualifier wants decreased)\n"
+                f"• 'missing_qualifier': Subject/object found but no info about the qualifiers\n\n"
             )
         else:
             triple_description = f"'{subject}' {predicate} '{obj}'"
@@ -260,49 +290,43 @@ class OllamaClient:
         
         prompt = (
             f"{reasoning_prompt}"
-            f"CRITICAL LOGIC RULES:\n"
-            f"1. If you CANNOT provide a supporting_sentence, is_supported MUST be false.\n"
-            f"2. Be logically consistent - your supporting_sentence and is_supported must align.\n\n"
-            f"SEMANTIC UNDERSTANDING RULES:\n"
-            f"1. Consider SEMANTIC RELATIONSHIPS, not just exact terminology matches\n"
-            f"2. Related medical terms should be considered equivalent (e.g., 'congenital hemiplegia' and 'spastic hemiplegia')\n"
-            f"3. For ALL relationship types, recognize synonymous expressions:\n"
-            f"   - As an example, the 'subclass_of' relationship can be expressed as 'is_a', 'form of', 'type of', 'category of', 'kind of', 'variant of', 'subset of'\n"
-            f"   - Similar principle applies to other relationships (look for equivalent expressions)\n"
-            f"4. Medical conditions may be described using synonymous or closely related terms\n"
-            f"5. Focus on the CONCEPTUAL relationship described, not exact word matching\n\n"
-            f"{qualifier_guidance}"
-            f"EVALUATION TASK:\n"
-            f"Given the following research abstract, determine if the triple "
-            f"{triple_description} is supported by the content.\n"
+            f"**TASK**: Determine if this triple is supported by the abstract:\n"
+            f"**TRIPLE**: {triple_description}\n\n"
             f"{subject_names_text}"
-            f"{object_names_text}\n\n"
-            f"Pay special attention to:\n"
-            f"- Statements that establish hierarchical relationships (e.g., X is a form/type of Y)\n"
-            f"- Related medical terminology that may describe the same or similar concepts\n"
-            f"- The equivalent names provided above - any mention of these should be considered as referring to the same concepts\n"
-            f"- Implicit relationships that are scientifically established\n\n"
-            f"Abstract: {abstract}\n\n"
-            f"Respond with ONLY a valid JSON object (use double quotes, not single quotes) containing:\n"
-            f"- \"is_supported\": boolean (true only if ALL qualifier requirements are met)\n"
-            f"- \"evidence_category\": string (one of: \"direct_evidence\", \"opposite_assertion\", \"related_not_direct\", \"not_supported\", \"dont_know\")\n"
-            f"- \"supporting_sentence\": string (the most relevant sentence from the abstract, or null if not supported)\n"
-            f"- \"reasoning\": string (detailed explanation including qualifier assessment)\n"
-            f"- \"subject_mentioned\": boolean (true if any equivalent name of the subject '{subject}' is mentioned in the abstract)\n"
-            f"- \"object_mentioned\": boolean (true if any equivalent name of the object '{obj}' is mentioned in the abstract)\n\n"
-            f"EVIDENCE CATEGORY DEFINITIONS:\n"
-            f"- \"direct_evidence\": Clear evidence supporting ALL aspects (causation + direction + aspect)\n"
-            f"- \"opposite_assertion\": Evidence showing opposite direction or contradictory relationship\n"
-            f"- \"related_not_direct\": Related to the topic but missing qualifier specificity\n"
-            f"- \"not_supported\": No relevant evidence found\n"
-            f"- \"dont_know\": Ambiguous or insufficient information to categorize\n\n"
-            f"CRITICAL JSON FORMATTING RULES:\n"
-            f"1. Use ONLY double quotes (\") for keys and string values\n"
-            f"2. If text contains quotes, escape them with backslash (\\\")\n"
-            f"3. Do not include any text before or after the JSON object\n"
-            f"4. Ensure all strings are properly closed with matching quotes\n"
-            f"5. Use null (not \"null\") for empty supporting_sentence\n\n"
-            f"Example: {{\"is_supported\": true, \"supporting_sentence\": \"The study shows X affects Y significantly.\", \"reasoning\": \"Clear causal relationship established.\"}}"
+            f"{object_names_text}\n"
+            
+            f"**ABSTRACT**: {abstract}\n\n"
+            f"{self._get_common_matching_rules()}"
+            f"{qualifier_guidance if has_qualifiers else ''}"
+            f"**EVALUATION STEPS**:\n"
+            f"1. **Check entity mentions** (subject_mentioned / object_mentioned):\n"
+            f"   - Set to TRUE if the entity appears ANYWHERE in abstract (use equivalent names lists or any common abbreviations or variants of the equivalent names)\n"
+            f"   - Entity mention is COMPLETELY INDEPENDENT from whether the triple is supported\n"
+            f"2. **Find sentence describing DIRECT relationship** between subject and object:\n"
+            f"   - The sentence MUST mention BOTH entities\n"
+            f"   - The sentence MUST describe a DIRECT causal link\n"
+            f"3. **Verify relationship matches predicate**:\n"
+            f"   - 'stimulates': Explicit causal/activation language OR strong implication from experimental manipulation\n"
+            f"   - 'inhibits': Explicit inhibition/suppression language OR strong implication from experimental evidence\n"
+            f"4. **Determine category**:\n"
+            f"   - 'direct_support': Explicit causal statement or clear experimental evidence ('X activates Y', 'X treatment increased Y')\n"
+            f"   - 'opposite_assertion': Relationship explicitly contradicts triple\n"
+            f"   - 'not_supported': Correlation, co-occurrence, transitive reasoning, or no evidence\n\n"
+
+            f"**OUTPUT** (JSON only, no other text):\n"
+            f"{{\n"
+            f"  \"is_supported\": true/false,\n"
+            f"  \"evidence_category\": \"direct_support\"/\"opposite_assertion\"/\"wrong_qualifier\"/\"missing_qualifier\"/\"not_supported\",\n"
+            f"  \"supporting_sentence\": \"exact quote from abstract\" or null,\n"
+            f"  \"reasoning\": \"Subject: [found/not found] as '[name found in abstract]' (equivalent to '[original name or name from list]'). Object: [found/not found] as '[name found in abstract]' (equivalent to '[original name or name from list]'). Relationship analysis: [detailed and professionalexplanation based on the abstract content]. Evidence category: [category] because [detailed reason based on category definition]. Conclusion: [supported/not supported].\",\n"
+            f"  \"subject_mentioned\": true/false,\n"
+            f"  \"object_mentioned\": true/false\n"
+            f"}}\n\n"
+            f"**CONSISTENCY RULES**:\n"
+            f"• If no supporting_sentence → is_supported=false\n"
+            f"• The logic of the reasoning must align with is_supported value\n"
+            f"• Supporting sentence must align with is_supported value\n\n"
+
         )
 
         try:
@@ -443,3 +467,174 @@ class OllamaClient:
         except Exception as e:
             logger.error(f"Error during Ollama evaluation: {e}")
             raise
+    
+    async def verify_evaluation(self, triple: Union[List[str], 'TripleData'], abstract: str, 
+                                original_evaluation: Dict[str, Any], checker_model: str = "gpt-oss:20b") -> Dict[str, Any]:
+        """Verify an evaluation result using a checker model, specifically checking name recognition.
+        
+        Args:
+            triple: The research triple (TripleData or list)
+            abstract: The abstract text
+            original_evaluation: The original evaluation result from another LLM
+            checker_model: The model to use for verification (default: gpt-oss:20b)
+            
+        Returns:
+            Dict with verification results and potentially corrected evaluation
+        """
+        # Handle both list and TripleData formats
+        if hasattr(triple, 'subject'):
+            subject = triple.subject
+            predicate = triple.predicate
+            obj = triple.object
+            subject_names = getattr(triple, 'subject_names', [subject])
+            object_names = getattr(triple, 'object_names', [obj])
+            # Get qualifier information if available
+            qual_pred = getattr(triple, 'qualified_predicate', None)
+            qual_aspect = getattr(triple, 'qualified_object_aspect', None)
+            qual_direction = getattr(triple, 'qualified_object_direction', None)
+        else:
+            subject, predicate, obj = triple
+            subject_names = [subject]
+            object_names = [obj]
+            qual_pred = None
+            qual_aspect = None
+            qual_direction = None
+        
+        # Build triple description with qualifiers if available
+        triple_desc = f"'{subject}' {predicate} '{obj}'"
+        if qual_pred:
+            qualifier_parts = [qual_pred]
+            if qual_direction:
+                qualifier_parts.append(qual_direction)
+            if qual_aspect:
+                qualifier_parts.append(qual_aspect)
+            triple_desc += f" (with qualifiers: {', '.join(qualifier_parts)})"
+        
+        # Build verification prompt
+        verification_prompt = (
+            f"You are an expert medical researcher with a strong understanding of medical and biological semantics.\n"
+            f"Your job is to carefully verify and check another expert medical researcher's evaluation result.\n\n"
+            f"TRIPLE BEING EVALUATED:\n{triple_desc}\n\n"
+            f"ORIGINAL EVALUATION:\n"
+            f"- subject_mentioned: {original_evaluation.get('subject_mentioned', False)}\n"
+            f"- object_mentioned: {original_evaluation.get('object_mentioned', False)}\n"
+            f"- is_supported: {original_evaluation.get('is_supported', False)}\n"
+            f"- evidence_category: {original_evaluation.get('evidence_category', 'not_supported')}\n"
+            f"- reasoning: {original_evaluation.get('reasoning', '')}\n\n"
+            f"SUBJECT EQUIVALENT NAMES:\n"
+        )
+        
+        for i, name in enumerate(subject_names, 1):
+            verification_prompt += f"  {i}. {name}\n"
+        
+        verification_prompt += f"\nOBJECT EQUIVALENT NAMES:\n"
+        for i, name in enumerate(object_names, 1):
+            verification_prompt += f"  {i}. {name}\n"
+        
+        verification_prompt += (
+            f"\n**ABSTRACT**: {abstract}\n\n"
+            f"**VERIFICATION TASK**: Check if the original evaluation is correct.\n\n"
+            f"{self._get_common_matching_rules()}"
+            f"**VERIFICATION STEPS**:\n"
+            f"1. **Check entity mentions**:\n"
+            f"   - Set subject_mentioned=TRUE if subject  appears ANYWHERE\n"
+            f"   - Set object_mentioned=TRUE if object appears ANYWHERE\n"
+            f"   - Use equivalent names list or common abbreviations\n"
+            f"2. **Find sentence describing DIRECT relationship** between subject and object:\n"
+            f"   - Sentence MUST mention BOTH entities\n"
+            f"   - Sentence MUST show DIRECT causal link (not correlation, not transitive)\n"
+            f"3. **VALIDATE SUPPORTING SENTENCE**: Does the original supporting_sentence mention BOTH subject and object?\n"
+            f"   - If NO → Find correct sentence and provide in corrected_supporting_sentence\n"
+            f"4. **Verify relationship matches predicate** (use semantic equivalents)\n"
+            f"5. **LOGIC**:\n"
+            f"• Entity mentions are INDEPENDENT: can be mentioned=TRUE but still not_supported (not correctly match to the triple relationship)\n"
+            f"• If no direct relationship → is_supported=false\n"
+            f"• Distinguish positive/negative/neutral → 'does not decrease/inhibit' is NEUTRAL (not an increase)\n\n"
+            f"6. Compare with original: Did it correctly identify entities and relationship?\n"
+            f"7. Set is_correct=true if original is right, false if wrong (with corrections)\n\n"
+            f"**COMMON ERRORS TO CHECK**:\n"
+            f"• **Entity mentions marked incorrectly**: Entity appears in abstract but marked as not mentioned\n"
+            f"• **Confusing mention with support**: Entity mentioned but not correctly match to the triple relationship → should be mentioned=TRUE but not_supported\n"
+            f"• Supporting sentence mentions different entity than the target subject or object\n"
+            f"• Supporting sentence describes relationship with wrong subject or object (e.g., says 'X inhibits Y' but triple is about 'Z inhibits Y')\n"
+            f"• Missing correct evidence that actually exists in the abstract\n"
+            f"• **CRITICAL**: Confusing neutral ('does not decrease') with positive ('increases') - these are NOT equivalent\n"
+            f"• **Correlation as causation**: 'X correlates with Y' marked as supporting 'X stimulates Y' (WRONG - correlation ≠ causation)\n"
+            f"• **Transitive reasoning**: 'Z affects both X and Y' marked as supporting 'X affects Y' (WRONG - no direct relationship)\n"
+            f"• **Opposite labeled as support**: Abstract contradicts triple but marked as 'direct_support' instead of 'opposite_assertion'\n"
+            f"• **Inverse relationship**: 'Increases A while decreasing B' marked as supporting 'B stimulates A' (WRONG)\n"
+            f"• **Missing entity in supporting sentence**: Supporting sentence DOES NOT mention BOTH subject and object explicitly\n\n"
+
+            f"**OUTPUT** (JSON only):\n"
+            f"{{\n"
+            f'  "is_correct": true/false,\n'
+            f'  "corrected_subject_mentioned": true/false,\n'
+            f'  "corrected_object_mentioned": true/false,\n'
+            f'  "corrected_is_supported": true/false,\n'
+            f'  "corrected_evidence_category": "direct_support|opposite_assertion|wrong_qualifier|missing_qualifier|not_supported",\n'
+            f'  "corrected_supporting_sentence": "quote from abstract" or null,\n'
+            f'  "corrected_reasoning": "Subject: [found/not found] as \'[name found in abstract]\' (equivalent to \'[original name or name from list]\'). Object: [found/not found] as \'[name found in abstract]\' (equivalent to \'[original name or name from list]\'). Relationship: [matches/conflicts/missing] because [detailed and professional explanation based on the abstract content]. Evidence category: [category] because [detailed reason based on category definition]. Conclusion: [supported/not supported]."\n'
+            f"}}\n"
+        )
+        
+        try:
+            # Use specified checker model for verification
+            verifier = OllamaClient(model=checker_model, base_url=self.base_url)
+            response_data = await verifier.generate_response(verification_prompt)
+            
+            # Extract content
+            if hasattr(response_data, 'message'):
+                content = response_data.message.content if hasattr(response_data.message, 'content') else ""
+            else:
+                content = response_data.get("message", {}).get("content", "")
+            
+            # Parse JSON response
+            import re
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                json_str = self._fix_json_formatting(json_str)
+                verification_result = json.loads(json_str)
+                
+                # If verification found errors, return corrected evaluation
+                if not verification_result.get("is_correct", True):
+                    logger.info(f"Verification found issues, returning corrected evaluation")
+                    corrected_eval = original_evaluation.copy()
+                    
+                    # Update name mentions
+                    corrected_eval["subject_mentioned"] = verification_result.get("corrected_subject_mentioned", 
+                                                                                  original_evaluation.get("subject_mentioned"))
+                    corrected_eval["object_mentioned"] = verification_result.get("corrected_object_mentioned",
+                                                                                 original_evaluation.get("object_mentioned"))
+                    
+                    # Update is_supported and evidence_category if provided
+                    if "corrected_is_supported" in verification_result:
+                        corrected_eval["is_supported"] = verification_result["corrected_is_supported"]
+                    
+                    if "corrected_evidence_category" in verification_result:
+                        corrected_eval["evidence_category"] = verification_result["corrected_evidence_category"]
+                    
+                    # Update supporting_sentence if provided
+                    if "corrected_supporting_sentence" in verification_result:
+                        corrected_eval["supporting_sentence"] = verification_result["corrected_supporting_sentence"]
+                    
+                    # Use the corrected reasoning with [VERIFIED & CORRECTED] label
+                    new_reasoning = verification_result.get("corrected_reasoning", "").strip()
+                    if new_reasoning:
+                        corrected_eval["reasoning"] = f"[VERIFIED & CORRECTED] {new_reasoning}"
+                    else:
+                        logger.warning("Verification did not provide corrected_reasoning, keeping original")
+                        corrected_eval["reasoning"] = original_evaluation.get("reasoning", "") + " [Verification attempted but no corrected reasoning provided]"
+                    
+                    return corrected_eval
+                else:
+                    logger.info("Verification confirmed original evaluation is correct")
+                    return original_evaluation
+            else:
+                logger.warning("Could not parse verification response, returning original evaluation")
+                return original_evaluation
+                
+        except Exception as e:
+            logger.error(f"Error during verification: {e}")
+            # If verification fails, return original evaluation
+            return original_evaluation

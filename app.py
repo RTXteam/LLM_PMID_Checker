@@ -73,13 +73,15 @@ def display_environment_status():
             st.sidebar.warning(f"⚠️ {warning}")
     
 
-async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progress_callback=None) -> TripleEvaluationResult:
+async def run_evaluation(triple_data: dict, pmids: List[str], model: str, checker_model: str = 'gpt-oss:20b', progress_callback=None) -> TripleEvaluationResult:
     """Run the triple check asynchronously with progress tracking."""
     try:
         if progress_callback:
             progress_callback(10, "🔧 Initializing checking system...")
         
-        evaluator = TripleEvaluatorSystem(llm_provider=model)
+        # Use checker_model for verification (None means disable)
+        checker = checker_model if checker_model.lower() != 'none' else None
+        evaluator = TripleEvaluatorSystem(llm_provider=model, checker_model=checker)
         
         if progress_callback:
             progress_callback(20, "📡 Fetching abstracts from PubMed...")
@@ -130,7 +132,7 @@ async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progre
                 evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
-                    evidence_category="dont_know",
+                    evidence_category="not_supported",
                     supporting_sentence=None,
                     reasoning=f"Error: {data.error}",
                     subject_mentioned=False,
@@ -172,7 +174,7 @@ async def run_evaluation(triple_data: dict, pmids: List[str], model: str, progre
                 evaluations.append(                TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
-                    evidence_category="dont_know",
+                    evidence_category="not_supported",
                     supporting_sentence=None,
                     reasoning=f"Evaluation failed: {str(e)}",
                     subject_mentioned=False,
@@ -203,25 +205,26 @@ def create_results_dataframe(result: TripleEvaluationResult) -> pd.DataFrame:
     for eval_result in result.evaluations:
         # Map evidence categories to display formats
         category_map = {
-            "direct_evidence": "Direct evidence",
+            "direct_support": "Direct support",
             "opposite_assertion": "Opposite Assertion",
-            "related_not_direct": "Related (Not Direct)",
-            "not_supported": "Not mentioned or not related",
-            "dont_know": "Unknown"
+            "missing_qualifier": "Missing qualifier",
+            "wrong_qualifier": "Wrong qualifier",
+            "not_supported": "Not supported"
         }
         category_display = category_map.get(eval_result.evidence_category, "Unknown")
         
-        # Update supported logic: direct_evidence and related_not_direct are both supported
-        is_supported = eval_result.evidence_category in ["direct_evidence", "related_not_direct"]
+        # Only direct_support is considered supported
+        is_supported = eval_result.evidence_category == "direct_support"
         
-        # Reorder columns as requested: PMID, Supported, Short Explanation, Subject Mentioned, Object Mentioned, Supporting Sentence
+        # Reorder columns: PMID, Supported, Short Explanation, Subject Mentioned, Object Mentioned, Supporting Sentence, Reasoning
         data.append({
             'PMID': f"https://pubmed.ncbi.nlm.nih.gov/{eval_result.pmid}",  # Full URL for linking
             'Supported': is_supported,
-            'Short Explanation': category_display,
+            'Category': category_display,
             'Subject Mentioned': "Yes" if eval_result.subject_mentioned else "No",
             'Object Mentioned': "Yes" if eval_result.object_mentioned else "No",
-            'Supporting Sentence': eval_result.supporting_sentence or ''
+            'Supporting Sentence': eval_result.supporting_sentence or '',
+            'Reasoning': eval_result.reasoning or ''
         })
     return pd.DataFrame(data)
 
@@ -281,16 +284,16 @@ def main_container():
     col1, col2, col3 = st.columns([2, 1, 2])
     with col1:
         if input_mode == "Entity Names (with normalization)":
-            subject = st.text_input("Subject", value="SIX1", help="Gene/protein name (will be normalized)", key="entity_subject")
+            subject = st.text_input("Subject", value="SIX1", help="Gene/protein name (will be normalized)", key="entity_subject").strip()
         else:
-            subject = st.text_input("Subject CURIE", value="NCBIGene:6495", help="Subject CURIE (e.g., NCBIGene:6495)", key="curie_subject")
+            subject = st.text_input("Subject CURIE", value="NCBIGene:6495", help="Subject CURIE (e.g., NCBIGene:6495)", key="curie_subject").strip()
     with col2:
-        predicate = st.text_input("Predicate", value="affects", help="The relationship or action", key="predicate_input")
+        predicate = st.text_input("Predicate", value="affects", help="The relationship or action", key="predicate_input").strip()
     with col3:
         if input_mode == "Entity Names (with normalization)":
-            object_ = st.text_input("Object", value="Cell Proliferation", help="Process/condition name (will be normalized)", key="entity_object")
+            object_ = st.text_input("Object", value="Cell Proliferation", help="Process/condition name (will be normalized)", key="entity_object").strip()
         else:
-            object_ = st.text_input("Object CURIE", value="UMLS:C0596290", help="Object CURIE (e.g., UMLS:C0596290)", key="curie_object")
+            object_ = st.text_input("Object CURIE", value="UMLS:C0596290", help="Object CURIE (e.g., UMLS:C0596290)", key="curie_object").strip()
     
     # Qualifier inputs section
     st.subheader("🔍 Optional Qualifiers")
@@ -302,17 +305,17 @@ def main_container():
             qualified_predicate = st.text_input("Qualified Predicate", 
                                                value="", 
                                                help="More specific relationship (e.g., 'causes', 'regulates'). Required if using any qualifiers.",
-                                               key="new_qualified_predicate")
+                                               key="new_qualified_predicate").strip()
         with qualifier_col2:
             qualified_object_aspect = st.text_input("Object Aspect", 
                                                    value="", 
                                                    help="Aspect of the object (e.g., 'activity', 'abundance', 'activity_or_abundance')",
-                                                   key="new_qualified_object_aspect")
+                                                   key="new_qualified_object_aspect").strip()
         with qualifier_col3:
             qualified_object_direction = st.text_input("Direction", 
                                                       value="", 
                                                       help="Direction of change (e.g., 'increased', 'decreased', 'upregulated')",
-                                                      key="new_qualified_object_direction")
+                                                      key="new_qualified_object_direction").strip()
         
         # Qualifier validation message for new interface
         has_any_qualifier = any([qualified_predicate.strip(), qualified_object_aspect.strip(), qualified_object_direction.strip()])
@@ -492,19 +495,60 @@ def main_container():
     
     col1, col2 = st.columns(2)
     with col1:
-        model = st.selectbox(
+        st.subheader("Validation Model")
+        model_display = st.selectbox(
             "Select Model",
-            options=["hermes4", "gpt-oss"],
+            options=["Hermes 4", "GPT-OSS"],
             index=0,
-            help="Choose the language model for evaluation"
+            help="Choose the language model for triple validation",
+            label_visibility="collapsed"
         )
+        
+        # Map display name to actual model name
+        model = "hermes4:70b" if model_display == "Hermes 4" else "gpt-oss:20b"
+        
+        # Model information
+        if model == "hermes4:70b":
+            st.info("🧠 **Hermes 4 70B (Q4_K_XL)**\n- ~42GB VRAM required\n- Hybrid reasoning mode\n- Best accuracy")
+        else:
+            st.info("🧠 **GPT-OSS 20B**\n- ~12GB VRAM required\n- Good accuracy\n- Faster than Hermes 4")
     
     with col2:
-        # Model information
-        if model == "hermes4":
-            st.info("🧠 **Hermes 4 70B (Q4_K_XL)**\n- ~42GB VRAM required\n- Hybrid reasoning mode with <think> tags\n- Enhanced JSON schema adherence\n- Improved instruction following")
+        # Put checkbox and title on the same row
+        ver_col1, ver_col2 = st.columns([3, 1])
+        with ver_col1:
+            st.subheader("Verification Model")
+        with ver_col2:
+            enable_verification = st.checkbox(
+                "Enable",
+                value=False,
+                help="Use a second model to double-check name recognition"
+            )
+        
+        checker_model = None
+        if enable_verification:
+            checker_display = st.selectbox(
+                "Select Checker Model",
+                options=["GPT-OSS", "Hermes 4"],
+                index=0,
+                help="Model used to verify validation results",
+                label_visibility="collapsed"
+            )
+            
+            # Map display name to actual model name
+            checker_model = "hermes4:70b" if checker_display == "Hermes 4" else "gpt-oss:20b"
+            
+            # Checker model information
+            if checker_model == "hermes4:70b":
+                st.info("✓ **Hermes 4 Verification**\n- Double-checks entity names\n- Catches missed synonyms\n- Highest accuracy")
+            else:
+                st.info("✓ **GPT-OSS Verification**\n- Double-checks entity names\n- Catches missed synonyms\n- Faster verification")
         else:
-            st.info("🧠 **GPT-OSS 120B**\n- ~65GB VRAM required\n- Higher accuracy\n- Slower processing")
+            st.warning("⚠️ **No Verification Enabled**\n\n"
+                      "Without verification:\n\n"
+                      "• Entity names checked once only\n\n"
+                      "• May miss some synonyms\n\n"
+                      "• Results returned faster")
     
     
     st.divider()
@@ -545,7 +589,7 @@ def main_container():
             
             try:
                 # Run the evaluation with progress tracking
-                result = asyncio.run(run_evaluation(triple_data, pmids, model, update_progress))
+                result = asyncio.run(run_evaluation(triple_data, pmids, model, checker_model, update_progress))
                 
                 # Store in session state
                 st.session_state.last_result = result
@@ -610,9 +654,9 @@ def display_evaluation_results():
         with metric_row2_col1:
             st.metric("❌ Not Supported", summary['unsupported_pmids'], delta=f"{summary['unsupported_percentage']}%")
         with metric_row2_col2:
-            # Count direct evidence PMIDs
-            direct_evidence_count = len([e for e in result.evaluations if e.evidence_category == "direct_evidence"])
-            st.metric("🎯 Direct Evidence", direct_evidence_count)
+            # Count direct support PMIDs
+            direct_support_count = len([e for e in result.evaluations if e.evidence_category == "direct_support"])
+            st.metric("🎯 Direct Support", direct_support_count)
     
     with chart_col:
         # Create and display pie chart
@@ -657,11 +701,32 @@ def display_results_table(df: pd.DataFrame, view_type: str):
             help="PubMed ID - Click to view the full article on PubMed",
             display_text=r"https://pubmed\.ncbi\.nlm\.nih\.gov/(\d+)"
         ),
-        'Supported': st.column_config.CheckboxColumn('Supported', help="Whether the triple relationship is supported by the evidence (Direct Evidence and Related count as supported)"),
-        'Short Explanation': st.column_config.TextColumn('Short Explanation', help="Evidence strength category: Direct evidence = strong evidence, Related (Not Direct) = relevant but incomplete evidence, Not mentioned or not related = not supported, Opposite Assertion = contradictory evidence, Unknown = ambiguous"),
-        'Subject Mentioned': st.column_config.TextColumn('Subject Mentioned', help="Whether the subject entity (or its equivalent names) is mentioned anywhere in the abstract"),
-        'Object Mentioned': st.column_config.TextColumn('Object Mentioned', help="Whether the object entity (or its equivalent names) is mentioned anywhere in the abstract"),
-        'Supporting Sentence': st.column_config.TextColumn('Supporting Sentence', help="The most relevant sentence from the abstract that supports the relationship (only shown for Direct Evidence and Related categories)", width="large")
+        'Supported': st.column_config.CheckboxColumn(
+            'Supported', 
+            help="Whether the triple relationship is supported (Direct support and Implicit support count as supported)"
+        ),
+        'Category': st.column_config.TextColumn(
+            'Category', 
+            help="Evidence category:\n• Direct support = exact/semantic match\n• Implicit support = general predicate match\n• Opposite Assertion = opposite predicate\n• Wrong qualifier = conflicts with qualifiers\n• Missing qualifier = missing qualifiers\n• Not supported = not mentioned\n• Unknown = ambiguous"
+        ),
+        'Subject Mentioned': st.column_config.TextColumn(
+            'Subject Mentioned', 
+            help="Whether the subject entity (or its equivalent names) is mentioned in the abstract"
+        ),
+        'Object Mentioned': st.column_config.TextColumn(
+            'Object Mentioned', 
+            help="Whether the object entity (or its equivalent names) is mentioned in the abstract"
+        ),
+        'Supporting Sentence': st.column_config.TextColumn(
+            'Supporting Sentence', 
+            help="The most relevant sentence from the abstract (shown for Direct support and Implicit support)", 
+            width="large"
+        ),
+        'Reasoning': st.column_config.TextColumn(
+            'Reasoning', 
+            help="Detailed explanation of the categorization decision", 
+            width="large"
+        )
     }
     
     # Display with styling
@@ -706,6 +771,7 @@ def export_results(result: TripleEvaluationResult, triple: List[str], model: str
                     "is_supported": e.is_supported,
                     "evidence_category": e.evidence_category,
                     "supporting_sentence": e.supporting_sentence,
+                    "reasoning": e.reasoning,
                     "subject_mentioned": e.subject_mentioned,
                     "object_mentioned": e.object_mentioned
                 }

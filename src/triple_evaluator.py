@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any
 from .pmid_extractor import PMIDExtractor
 from .evaluation_agent import EvaluationAgent, TripleData, TripleEvaluation
+from .llm_factory import create_llm_client
 from .config import settings
 
 logger = logging.getLogger(__name__)
@@ -20,17 +21,17 @@ class TripleEvaluationResult:
         for eval_result in self.evaluations:
             # Map evidence categories to display formats
             category_map = {
-                "direct_evidence": "Direct evidence",
+                "direct_support": "Direct support",
                 "opposite_assertion": "Opposite Assertion",
-                "related_not_direct": "Related (Not Direct)",
-                "not_supported": "Not mentioned or not related",
-                "dont_know": "Unknown"
+                "missing_qualifier": "Missing qualifier",
+                "wrong_qualifier": "Wrong qualifier",
+                "not_supported": "Not supported"
             }
             
             category_display = category_map.get(eval_result.evidence_category, "Unknown")
             
-            # Update supported logic: direct_evidence and related_not_direct are both supported
-            is_supported = eval_result.evidence_category in ["direct_evidence", "related_not_direct"]
+            # Only direct_support is considered supported
+            is_supported = eval_result.evidence_category == "direct_support"
             
             # Build the main line with all key information
             supported_text = "Supported" if is_supported else "Not Supported"
@@ -40,8 +41,8 @@ class TripleEvaluationResult:
             # Main output line with key information in requested order: PMID → Supported → Category → Subject → Object → Supporting Sentence
             main_line = f"PMID:{eval_result.pmid}, {supported_text}, {category_display}, Subject:{subject_mentioned}, Object:{object_mentioned}"
             
-            # Add supporting sentence if available
-            if eval_result.evidence_category in ["direct_evidence", "related_not_direct"] and eval_result.supporting_sentence:
+            # Add supporting sentence if available for supported categories
+            if eval_result.evidence_category == "direct_support" and eval_result.supporting_sentence:
                 main_line += f", [{eval_result.supporting_sentence}]"
             
             lines.append(main_line)
@@ -59,9 +60,9 @@ class TripleEvaluationResult:
     
     def get_summary(self) -> Dict[str, Any]:
         """Get a summary of the evaluation results."""
-        # Update supported logic: direct_evidence and related_not_direct are both supported
+        # Only direct_support is considered supported
         supported_count = sum(1 for eval_result in self.evaluations 
-                            if eval_result.evidence_category in ["direct_evidence", "related_not_direct"])
+                            if eval_result.evidence_category == "direct_support")
         total_count = len(self.evaluations)
         unsupported_count = total_count - supported_count
         
@@ -80,18 +81,25 @@ class TripleEvaluationResult:
 class TripleEvaluatorSystem:
     """Main system for checking triples against PMID abstracts using Ollama LLMs."""
     
-    def __init__(self, llm_provider):
+    def __init__(self, llm_provider, checker_model=None):
         """Initialize the triple checking system.
         
         Args:
-            llm_provider: LLM provider to use ('hermes4', 'gpt-oss').
+            llm_provider: LLM provider to use ('hermes4', 'gpt-oss', or full model name like 'hermes4:70b').
+            checker_model: Optional model for verification (e.g., 'gpt-oss:20b'). If None, disables verification.
         """
         self.pmid_extractor = PMIDExtractor(
             api_key=settings.ncbi_api_key,
             email=settings.ncbi_email
         )
         
-        self.evaluation_agent = EvaluationAgent(llm_provider=llm_provider)
+        # Create LLM client
+        llm_client = create_llm_client(llm_provider)
+        
+        # Initialize evaluation agent with checker model
+        self.evaluation_agent = EvaluationAgent(llm_client=llm_client, checker_model=checker_model)
+        self.checker_model = checker_model
+        self.use_verification = checker_model is not None
     
     async def evaluate_triple_with_names(self, 
                                        subject: str, 
@@ -168,7 +176,7 @@ class TripleEvaluatorSystem:
                 evaluations.append(TripleEvaluation(
                     pmid=pmid,
                     is_supported=False,
-                    evidence_category="dont_know",
+                    evidence_category="not_supported",
                     supporting_sentence=None,
                     reasoning=f"Error: {data.error}",
                     subject_mentioned=False,
@@ -201,7 +209,8 @@ class TripleEvaluatorSystem:
                         triple=triple,
                         abstract=abstract,
                         pmid=pmid,
-                        title=title
+                        title=title,
+                        use_verification=self.use_verification
                     )
                     
                     # Apply validation rules to ensure logical consistency
@@ -213,7 +222,7 @@ class TripleEvaluatorSystem:
                     evaluations.append(TripleEvaluation(
                         pmid=pmid,
                         is_supported=False,
-                        evidence_category="dont_know",
+                        evidence_category="not_supported",
                         supporting_sentence=None,
                         reasoning=f"Evaluation failed: {str(e)}",
                         subject_mentioned=False,
@@ -230,8 +239,9 @@ class TripleEvaluatorSystem:
         """Apply validation rules to ensure logical consistency in evaluation results.
         
         Rules:
-        1. If evidence_category is "not_supported", then supporting_sentence MUST be None
-        2. If no supporting_sentence for categories that should have one, adjust reasoning
+        1. "direct_support" should have is_supported = True
+        2. Categories that don't support should not have supporting_sentence
+        3. Ensure consistency between category and supporting sentence
         
         Args:
             evaluation: The original evaluation result
@@ -240,22 +250,29 @@ class TripleEvaluatorSystem:
         Returns:
             Corrected evaluation result
         """
-        # Rule 1: Direct evidence and related_not_direct must be supported
-        if (evaluation.evidence_category in ["direct_evidence", "related_not_direct"] and not evaluation.is_supported):
+        # Rule 1: Only direct_support should have is_supported = True
+        if evaluation.evidence_category == "direct_support" and not evaluation.is_supported:
             evaluation.is_supported = True
-            evaluation.reasoning += " [Auto-corrected: Direct evidence and related evidence are both supported]"
+            evaluation.reasoning += " [Auto-corrected: Direct support should be marked as supported]"
         
-        # Rule 2: Categories that shouldn't have supporting sentences
-        if evaluation.evidence_category in ["not_supported", "dont_know", "opposite_assertion"]:
+        # Rule 2: Other categories should not be marked as supported
+        if evaluation.evidence_category != "direct_support" and evaluation.is_supported:
+            evaluation.is_supported = False
+            evaluation.reasoning += " [Auto-corrected: Only direct_support can be marked as supported]"
+        
+        # Rule 3: Categories that shouldn't have supporting sentences
+        # Only direct_support should have supporting sentences
+        if evaluation.evidence_category in ["not_supported", "opposite_assertion", 
+                                            "wrong_qualifier", "missing_qualifier"]:
             if evaluation.supporting_sentence:
                 evaluation.supporting_sentence = None
-                evaluation.reasoning += " [Auto-corrected: Category doesn't require supporting sentence]"
+                evaluation.reasoning += " [Auto-corrected: This category doesn't require supporting sentence]"
         
-        # Rule 3: Ensure consistency for unsupported cases
-        if not evaluation.supporting_sentence or not evaluation.supporting_sentence.strip():
-            if evaluation.evidence_category in ["direct_evidence", "related_not_direct"]:
+        # Rule 4: Ensure supported categories have evidence
+        if evaluation.evidence_category == "direct_support":
+            if not evaluation.supporting_sentence or not evaluation.supporting_sentence.strip():
                 evaluation.supporting_sentence = None
-                evaluation.reasoning += " [Auto-corrected: No supporting evidence]"
+                evaluation.reasoning += " [Auto-corrected: No supporting evidence provided]"
         
         return evaluation
     
