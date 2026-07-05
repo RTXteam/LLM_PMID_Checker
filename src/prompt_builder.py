@@ -118,6 +118,7 @@ def _build_entity_section(
     name: str,
     entity_info: Optional[dict],
     equiv_names: List[str],
+    text_label: str = "supporting text",
 ) -> str:
     """Build the entity info + equivalent names section."""
     section = f"**{entity_type.upper()}**: {name}\n"
@@ -133,44 +134,12 @@ def _build_entity_section(
     label = entity_type.upper()
     section += (
         f"\n**{label} EQUIVALENT NAMES** "
-        f"(check for ANY of these + common abbreviations in the abstract):\n"
+        f"(check for ANY of these + common abbreviations in the {text_label}):\n"
     )
     for i, n in enumerate(equiv_names, 1):
         section += f"  {i}. {n}\n"
 
     return section
-
-
-def _get_instructions() -> str:
-    """Return the evaluation instructions."""
-    return (
-        "**INSTRUCTIONS**:\n"
-        "- Determine if the abstract provides evidence for this triple.\n"
-        '- Use "yes" if the relation is explicitly supported.\n'
-        '- Use "no" if the relation is not mentioned or contradicted.\n'
-        '- Use "maybe" if the evidence is indirect, ambiguous, or suggestive.\n'
-        '- If "yes", return one or more exact supporting sentences from the abstract.\n'
-        "  Multiple sentences are allowed if they together support the triple.\n"
-        '- If "no" or "maybe", return an empty list for "sentences".\n'
-        "- For subject_mentioned / object_mentioned: set to true if the entity appears\n"
-        "  ANYWHERE in the abstract (using equivalent names or common abbreviations).\n"
-        "  Entity mention is INDEPENDENT from whether the triple is supported.\n"
-        '- For "reasoning": briefly explain why you chose yes/no/maybe.\n\n'
-    )
-
-
-def _get_output_format() -> str:
-    """Return the JSON output format specification."""
-    return (
-        "**OUTPUT** (JSON only, no other text):\n"
-        "{\n"
-        '  "support": "yes" | "no" | "maybe",\n'
-        '  "sentences": ["exact sentence from abstract", ...],\n'
-        '  "subject_mentioned": true/false,\n'
-        '  "object_mentioned": true/false,\n'
-        '  "reasoning": "brief explanation of your judgment"\n'
-        "}\n"
-    )
 
 
 def _build_predicate_section(predicate: str) -> str:
@@ -185,15 +154,49 @@ def _build_predicate_section(predicate: str) -> str:
     )
 
 
-def build_evaluation_prompt(
+# ---------------------------------------------------------------------------
+# Text-mode prompt (classification only, no sentence extraction)
+# ---------------------------------------------------------------------------
+
+def _get_text_instructions() -> str:
+    """Return evaluation instructions for text-mode (classification only)."""
+    return (
+        "**INSTRUCTIONS**:\n"
+        "- Determine if the supporting text provides evidence for this triple.\n"
+        '- Use "yes" if the text explicitly supports the stated relationship.\n'
+        '- Use "no" if the text does not support or contradicts the relationship.\n'
+        '- Use "maybe" if the evidence is indirect, ambiguous, or only suggestive.\n'
+        "- For subject_mentioned / object_mentioned: set to true if the entity appears\n"
+        "  in the supporting text (using equivalent names or common abbreviations).\n"
+        "  Entity mention is INDEPENDENT from whether the triple is supported.\n"
+        '- For "reasoning": briefly explain why you chose yes/no/maybe.\n\n'
+    )
+
+
+def _get_text_output_format() -> str:
+    """Return the JSON output format for text-mode (no sentences field)."""
+    return (
+        "**OUTPUT** (JSON only, no other text):\n"
+        "{\n"
+        '  "support": "yes" | "no" | "maybe",\n'
+        '  "subject_mentioned": true/false,\n'
+        '  "object_mentioned": true/false,\n'
+        '  "reasoning": "brief explanation of your judgment"\n'
+        "}\n"
+    )
+
+
+def build_text_evaluation_prompt(
     triple: Union[List[str], 'TripleData'],
-    abstract: str,
+    supporting_text: str,
 ) -> str:
-    """Build the complete evaluation prompt.
+    """Build an evaluation prompt for direct supporting-text classification.
+
+    This prompt asks the LLM only to classify the relationship (yes/no/maybe) without extracting sentences.
 
     Args:
         triple: TripleData object or [subject, predicate, object] list
-        abstract: Abstract text to evaluate
+        supporting_text: The text snippet to evaluate
 
     Returns:
         Complete prompt string
@@ -201,16 +204,16 @@ def build_evaluation_prompt(
     info = _extract_triple_info(triple)
 
     prompt = (
-        "Please analyze whether the provided abstract supports the following triple.\n"
+        "Please analyze whether the provided supporting text supports the following triple.\n"
         "Carefully consider the subject, object, and predicate details.\n\n"
         f"**TRIPLE**: {_build_triple_description(info)}\n\n"
-        f"{_build_entity_section('Subject', info['subject'], info['subject_info'], info['subject_names'])}\n"
-        f"{_build_entity_section('Object', info['object'], info['object_info'], info['object_names'])}\n"
+        f"{_build_entity_section('Subject', info['subject'], info['subject_info'], info['subject_names'], text_label='supporting text')}\n"
+        f"{_build_entity_section('Object', info['object'], info['object_info'], info['object_names'], text_label='supporting text')}\n"
         f"{_build_predicate_section(info['predicate'])}"
-        f"**ABSTRACT**:\n{abstract}\n\n"
+        f"**SUPPORTING TEXT**:\n{supporting_text}\n\n"
         f"{get_matching_rules()}"
-        f"{_get_instructions()}"
-        f"{_get_output_format()}"
+        f"{_get_text_instructions()}"
+        f"{_get_text_output_format()}"
     )
 
     return prompt

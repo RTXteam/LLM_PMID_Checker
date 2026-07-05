@@ -15,25 +15,33 @@ import polars as pl
 
 from src.triple_evaluator import TripleEvaluatorSystem
 from src.node_dict_loader import NodeDictLoader
-from src.pmid_cache import PMIDCache
 from src.config import settings
 from src import prompt_builder
 
 logger = logging.getLogger(__name__)
 
 
-def _normalize_pmid(raw: str) -> str:
-    """Strip 'PMID:' prefix to get the bare numeric ID used by the cache."""
-    raw = raw.strip()
-    if raw.upper().startswith("PMID:"):
-        return raw[5:]
-    return raw
-
-
 OUTPUT_COLUMNS = [
+    'subject_name', 'object_name',
     'predicted', 'support', 'subject_mentioned', 'object_mentioned',
-    'supporting_sentences', 'reasoning', 'runtime_seconds',
+    'reasoning', 'runtime_seconds',
 ]
+
+
+def _build_all_columns(input_cols: list, output_cols: list) -> list:
+    """Build final column list, inserting subject_name/object_name next to
+    their corresponding CURIE columns instead of appending at the end."""
+    remaining_output = [c for c in output_cols
+                        if c not in ('subject_name', 'object_name')]
+    result = []
+    for col in input_cols:
+        result.append(col)
+        if col == 'subject_curie':
+            result.append('subject_name')
+        elif col == 'object_curie':
+            result.append('object_name')
+    result.extend(remaining_output)
+    return result
 
 POLARS_TO_SQLITE = {
     pl.Boolean: "INTEGER",
@@ -92,11 +100,11 @@ def _write_to_tsv(df: pl.DataFrame, output_path: str) -> None:
 # Resume helpers
 # ---------------------------------------------------------------------------
 
-_ROW_KEY_COLS = ('subject_curie', 'predicate', 'object_curie', 'PMID')
+_ROW_KEY_COLS = ('subject_curie', 'predicate', 'object_curie', 'supporting_text_id')
 
 
-def _row_key(row: dict) -> tuple:
-    return tuple(str(row.get(c, '')).strip() for c in _ROW_KEY_COLS)
+def _row_key(row: dict, key_cols: tuple = _ROW_KEY_COLS) -> tuple:
+    return tuple(str(row.get(c, '')).strip() for c in key_cols)
 
 
 def _sanitize_for_tsv(val: str) -> str:
@@ -110,7 +118,8 @@ def _sanitize_for_tsv(val: str) -> str:
 
 
 def _load_completed_keys(output_path: str, out_fmt: str,
-                         table_name: str) -> set[tuple]:
+                         table_name: str,
+                         key_cols: tuple = _ROW_KEY_COLS) -> set[tuple]:
     """Load the set of already-evaluated row keys from the output file."""
     p = Path(output_path)
     if not p.exists():
@@ -122,9 +131,9 @@ def _load_completed_keys(output_path: str, out_fmt: str,
                              infer_schema_length=0,
                              truncate_ragged_lines=True,
                              ignore_errors=True)
-            if not all(c in df.columns for c in _ROW_KEY_COLS):
+            if not all(c in df.columns for c in key_cols):
                 return set()
-            df = df.select(list(_ROW_KEY_COLS))
+            df = df.select(list(key_cols))
         else:
             conn = sqlite3.connect(output_path)
             tables = [r[0] for r in conn.execute(
@@ -133,15 +142,15 @@ def _load_completed_keys(output_path: str, out_fmt: str,
             if table_name not in tables:
                 conn.close()
                 return set()
-            key_cols = ', '.join(f'"{c}"' for c in _ROW_KEY_COLS)
+            col_expr = ', '.join(f'"{c}"' for c in key_cols)
             df = pl.read_database(
-                f'SELECT {key_cols} FROM "{table_name}"', conn
+                f'SELECT {col_expr} FROM "{table_name}"', conn
             )
             conn.close()
 
         keys = set()
         for row in df.iter_rows(named=True):
-            keys.add(_row_key(row))
+            keys.add(_row_key(row, key_cols))
         return keys
     except Exception as e:
         print(f"Warning: could not load existing output for resume: {e}")
@@ -258,11 +267,16 @@ def _write_timing_files(
     ts = datetime.now()
 
     # -- per-row timing TSV ------------------------------------------------
-    pmids = df["PMID"].cast(pl.Utf8).to_list()
+    if "supporting_text_id" in df.columns:
+        row_ids = df["supporting_text_id"].cast(pl.Utf8).to_list()
+        id_col = "supporting_text_id"
+    else:
+        row_ids = [str(i) for i in range(total_rows)]
+        id_col = "row_index"
     with open(paths["timing_results"], "w") as fh:
-        fh.write("PMID\truntime_seconds\n")
-        for pmid, rt in zip(pmids, runtimes):
-            fh.write(f"{pmid}\t{rt}\n")
+        fh.write(f"{id_col}\truntime_seconds\n")
+        for rid, rt in zip(row_ids, runtimes):
+            fh.write(f"{rid}\t{rt}\n")
 
     # -- aggregate stats ---------------------------------------------------
     rt_sum   = float(np.sum(runtimes))
@@ -469,17 +483,18 @@ def _write_metrics_files(
 
 async def evaluate_single_row(evaluator, row: dict, row_idx: int,
                               total_rows: int, node_dict=None):
-    """Evaluate a single row and return a dict of output columns only."""
+    """Evaluate a single row against its supporting text."""
     try:
         subject_curie = row['subject_curie']
         predicate = row['predicate']
         object_curie = row['object_curie']
-        pmid = str(row['PMID'])
+        supporting_text = row['supporting_text']
+        text_id = str(row.get('supporting_text_id', ''))
 
         subject = row.get('subject') or subject_curie
         object_ = row.get('object') or object_curie
 
-        print(f"[{row_idx + 1}/{total_rows}] {subject_curie} | {predicate} | {object_curie}  PMID:{pmid}")
+        print(f"[{row_idx + 1}/{total_rows}] {subject_curie} | {predicate} | {object_curie}  text_id:{text_id[:40]}")
 
         subject_info = node_dict.get_node_info(subject_curie) if node_dict else None
         object_info = node_dict.get_node_info(object_curie) if node_dict else None
@@ -494,15 +509,19 @@ async def evaluate_single_row(evaluator, row: dict, row_idx: int,
             if on:
                 object_names = on
 
+        subject_name = (subject_info or {}).get('name', '') or subject
+        object_name = (object_info or {}).get('name', '') or object_
+
         start = time.time()
 
-        result = await evaluator.evaluate_triple_with_names(
+        result = await evaluator.evaluate_triple_with_text(
             subject=subject,
             predicate=predicate,
             object_=object_,
+            supporting_text=supporting_text,
+            text_id=text_id,
             subject_names=subject_names,
             object_names=object_names,
-            pmids=[pmid],
             subject_info=subject_info,
             object_info=object_info,
         )
@@ -511,31 +530,33 @@ async def evaluate_single_row(evaluator, row: dict, row_idx: int,
 
         if result.evaluations:
             ev = result.evaluations[0]
-            sentences = " | ".join(ev.supporting_sentences) if ev.supporting_sentences else ""
             return {
+                'subject_name': subject_name,
+                'object_name': object_name,
                 'predicted': ev.is_supported,
                 'support': ev.support,
                 'subject_mentioned': ev.subject_mentioned,
                 'object_mentioned': ev.object_mentioned,
-                'supporting_sentences': sentences,
                 'reasoning': ev.reasoning or '',
                 'runtime_seconds': runtime,
             }
 
-        return _error_output('No evaluation result', 0.0)
+        return _error_output(subject_name, object_name, 'No evaluation result', 0.0)
 
     except Exception as e:
         print(f"    ERROR: {e}")
-        return _error_output(f'Error: {e}', 0.0)
+        return _error_output('', '', f'Error: {e}', 0.0)
 
 
-def _error_output(reasoning: str, runtime: float) -> dict:
+def _error_output(subject_name: str, object_name: str,
+                  reasoning: str, runtime: float) -> dict:
     return {
+        'subject_name': subject_name,
+        'object_name': object_name,
         'predicted': False,
         'support': 'no',
         'subject_mentioned': False,
         'object_mentioned': False,
-        'supporting_sentences': '',
         'reasoning': reasoning,
         'runtime_seconds': runtime,
     }
@@ -552,7 +573,7 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
                     max_concurrent: int = None,
                     predicate_file: str = None,
                     overwrite: bool = False):
-    """Read a TSV, evaluate every row concurrently, and write results
+    """Read input, evaluate every row concurrently, and write results
     incrementally so the run can be stopped and resumed at any time."""
     if predicate_file:
         prompt_builder.load_predicate_descriptions(predicate_file)
@@ -566,14 +587,24 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
     # ---- read input --------------------------------------------------
     input_ext = Path(input_file).suffix.lower()
     if input_ext in PARQUET_EXTENSIONS:
-        df = pl.read_parquet(input_file).cast({col: pl.Utf8 for col in pl.read_parquet_schema(input_file)})
+        df = pl.read_parquet(input_file)
+        schema = pl.read_parquet_schema(input_file)
+        castable = {
+            col: pl.Utf8 for col, dtype in schema.items()
+            if not isinstance(dtype, pl.List)
+        }
+        if castable:
+            df = df.cast(castable)
     else:
         df = pl.read_csv(input_file, separator='\t', infer_schema_length=0)
 
-    required_cols = {'subject_curie', 'predicate', 'object_curie', 'PMID'}
+    required_cols = {'subject_curie', 'predicate', 'object_curie', 'supporting_text'}
+    row_key_cols = _ROW_KEY_COLS
+    output_cols = OUTPUT_COLUMNS
+
     missing = required_cols - set(df.columns)
     if missing:
-        print(f"Error: input TSV is missing required columns: {missing}",
+        print(f"Error: input file is missing required columns: {missing}",
               file=sys.stderr)
         return 1
 
@@ -595,19 +626,16 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
     # ---- resume: detect already-evaluated rows -----------------------
     is_resume = False
     completed_keys: set[tuple] = set()
-    if out_fmt == 'db':
-        no_abs_table = table_name + "_no_abstract"
-    else:
-        no_abs_path = Path(db_path).with_name(
-            Path(db_path).stem + "_no_abstract.tsv"
-        )
     if not overwrite:
-        completed_keys = _load_completed_keys(db_path, out_fmt, table_name)
+        completed_keys = _load_completed_keys(
+            db_path, out_fmt, table_name, key_cols=row_key_cols,
+        )
     if completed_keys:
         is_resume = True
         pending_mask = pl.Series(
             "_pending",
-            [_row_key(row) not in completed_keys for row in df.iter_rows(named=True)]
+            [_row_key(row, row_key_cols) not in completed_keys
+             for row in df.iter_rows(named=True)]
         )
         df = df.filter(pending_mask)
         print(f"\n>>> RESUME MODE <<<")
@@ -625,9 +653,6 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
         if overwrite and out_path.exists():
             out_path.unlink()
             print("Overwrite: removed existing output file")
-        if out_fmt != 'db' and overwrite and no_abs_path.exists():
-            no_abs_path.unlink()
-            print("Overwrite: removed existing no-abstract file")
 
     # ---- optional node_dict ------------------------------------------
     node_dict = None
@@ -643,46 +668,6 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
             node_dict.merge_all_names_tsv(names_file)
             print(f"  Merged all_names from: {names_file}")
 
-    # ---- filter out rows with no valid abstract in cache ---------------
-    cache = PMIDCache()
-    print(f"Checking PMID abstracts in cache ({cache.count():,} cached)...")
-
-    raw_pmids = df['PMID'].to_list()
-    bare_pmids = [_normalize_pmid(str(p)) for p in raw_pmids]
-    cached_valid = cache.get_all_cached_pmids()
-
-    has_abstract = [bp in cached_valid for bp in bare_pmids]
-    has_abstract_series = pl.Series("_has_abstract", has_abstract)
-
-    df_valid = df.filter(has_abstract_series)
-    df_skipped = df.filter(~has_abstract_series)
-
-    if df_skipped.height > 0:
-        if out_fmt == 'db':
-            na_conn = sqlite3.connect(db_path)
-            na_conn.execute("PRAGMA journal_mode=WAL")
-            na_cols = df_skipped.columns
-            na_col_defs = ', '.join(f'"{c}" TEXT' for c in na_cols)
-            na_conn.execute(f'DROP TABLE IF EXISTS "{no_abs_table}"')
-            na_conn.execute(f'CREATE TABLE "{no_abs_table}" ({na_col_defs})')
-            na_ph = ', '.join('?' for _ in na_cols)
-            na_conn.executemany(
-                f'INSERT INTO "{no_abs_table}" VALUES ({na_ph})',
-                [[str(v) for v in row] for row in df_skipped.iter_rows()],
-            )
-            na_conn.commit()
-            na_conn.close()
-            print(f"Wrote {df_skipped.height:,} rows (no valid abstract) -> {db_path} table:{no_abs_table}")
-        else:
-            with open(no_abs_path, 'w', newline='', encoding='utf-8') as fh:
-                cols = df_skipped.columns
-                fh.write('\t'.join(cols) + '\n')
-                for row in df_skipped.iter_rows():
-                    vals = [_sanitize_for_tsv(str(v)) for v in row]
-                    fh.write('\t'.join(vals) + '\n')
-            print(f"Wrote {df_skipped.height:,} rows (no valid abstract) -> {no_abs_path}")
-
-    df = df_valid
     total_rows = df.height
 
     print()
@@ -690,18 +675,16 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
     print(f"  Total input rows:       {input_total:,}")
     if is_resume:
         print(f"  Previously completed:   {len(completed_keys):,}")
-    if df_skipped.height > 0:
-        print(f"  Skipped (no abstract):  {df_skipped.height:,}")
     print(f"  To evaluate this run:   {total_rows:,}")
     print("=" * 60)
 
     if total_rows == 0:
-        print("Nothing to evaluate (all rows done or have no abstract).")
+        print("Nothing to evaluate (all rows already done).")
         return 0
 
     # ---- prepare incremental writer ----------------------------------
-    input_cols = [c for c in df.columns if c not in OUTPUT_COLUMNS]
-    all_columns = input_cols + OUTPUT_COLUMNS
+    input_cols = [c for c in df.columns if c not in output_cols]
+    all_columns = _build_all_columns(input_cols, output_cols)
 
     writer = IncrementalWriter(
         db_path, out_fmt, table_name, all_columns, is_resume=is_resume,
@@ -720,9 +703,11 @@ async def run_batch(input_file: str, db_path: str, val_model: str, *,
     progress_interval = max(100, total_rows // 200)
     progress_lock = asyncio.Lock()
 
+    eval_fn = evaluate_single_row
+
     async def _eval(row, idx):
         async with semaphore:
-            result = await evaluate_single_row(
+            result = await eval_fn(
                 evaluator, row, idx, total_rows, node_dict
             )
         combined = {**row, **result}
@@ -878,13 +863,11 @@ def _print_metrics(df: pl.DataFrame, total_rows: int):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate research triples using vLLM, saving results "
-                    "to a SQLite database (recommended) or TSV file.",
+        description="Evaluate research triples against supporting text using vLLM, "
+                    "saving results to a SQLite database (recommended) or TSV file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Required input columns:  subject_curie, predicate, object_curie, PMID
-Optional input columns:  subject, object (entity names), ground_truth / Supported
-                         (any extra columns are preserved in the output)
+Required input columns: subject_curie, predicate, object_curie, supporting_text
 
 Input format is auto-detected from the --input file extension:
   .parquet / .pq            →  Parquet (recommended, preserves text exactly)
@@ -895,14 +878,15 @@ Output format is auto-detected from the --output file extension:
   .tsv / .txt               →  Tab-separated values
 
 Output columns added:  predicted, support, subject_mentioned, object_mentioned,
-                       supporting_sentences, reasoning, runtime_seconds
+                       reasoning, runtime_seconds
 
 Examples:
-  python main.py --input data/semmedb_kgx/semmeddb_edges_extracted.parquet --output results.db --val_model gpt-oss-120b-vllm --predicate_file data/biolink_data/biolink_predicates.tsv --node_dict data/semmedb_kgx/normalized_nodes.jsonl --names_file data/semmedb_kgx/curie_all_names.tsv
+  python main.py --input data/tmkp_kgx/tmkp_edges_extracted.parquet --output results.db --val_model gpt-oss-120b-vllm --predicate_file data/biolink_data/biolink_predicates.tsv --node_dict data/tmkp_kgx/nodes.jsonl --names_file data/tmkp_kgx/curie_all_names.tsv
         """,
     )
     parser.add_argument('--input', required=True,
-                        help='Input file (.parquet or .tsv; must contain subject_curie, predicate, object_curie, PMID)')
+                        help='Input file (.parquet or .tsv). '
+                             'Requires: subject_curie, predicate, object_curie, supporting_text.')
     parser.add_argument('--output', required=True,
                         help='Output file. Use .db/.sqlite for SQLite (recommended) or .tsv for TSV')
     parser.add_argument('--table', default='evaluations',

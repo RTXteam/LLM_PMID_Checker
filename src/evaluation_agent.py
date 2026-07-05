@@ -1,4 +1,4 @@
-"""LLM agent for evaluating triples against PMID abstracts."""
+"""LLM agent for evaluating triples against supporting text."""
 import logging
 from typing import List, Optional
 from dataclasses import dataclass, field
@@ -8,8 +8,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TripleEvaluation:
-    """Result of triple evaluation against an abstract."""
-    pmid: str
+    """Result of triple evaluation against supporting text."""
+    text_id: str
     support: str = "no"  # "yes", "no", "maybe"
     supporting_sentences: List[str] = field(default_factory=list)
     reasoning: str = ""
@@ -44,7 +44,7 @@ class TripleData:
 
 
 class EvaluationAgent:
-    """Agent for evaluating whether abstracts support research triples."""
+    """Agent for evaluating whether text supports research triples."""
 
     def __init__(self, llm_client, round2_client=None):
         """Initialize the evaluation agent.
@@ -57,139 +57,79 @@ class EvaluationAgent:
         self.round2_client = round2_client
         logger.info("Evaluation agent initialized")
 
-    async def evaluate_triple_against_abstract(
+    async def evaluate_triple_against_text(
         self,
         triple: TripleData,
-        abstract: str,
-        pmid: str,
-        title: str = "",
+        supporting_text: str,
+        text_id: str = "",
         use_round2: bool = False,
     ) -> TripleEvaluation:
-        """Evaluate whether an abstract supports a research triple.
-
-        Round 1: Primary evaluation using llm_client.
-        Round 2 (optional): Independent re-evaluation of "yes"/"maybe" results
-                            using round2_client with the same prompt.
+        """Classify whether a supporting text supports a research triple.
 
         Args:
             triple: The research triple to evaluate
-            abstract: The abstract text to analyze
-            pmid: PubMed ID for the abstract
-            title: Article title (optional)
+            supporting_text: The text snippet to classify
+            text_id: Identifier for the text (e.g. supporting_text_id)
             use_round2: Whether to run Round 2 re-evaluation
 
         Returns:
             TripleEvaluation result
         """
-        from .sentence_mapper import verify_sentences
-
         try:
-            # Round 1: Primary evaluation
-            result = await self.llm_client.evaluate_triple_support(
+            result = await self.llm_client.evaluate_text_support(
                 triple=triple,
-                abstract=abstract,
+                supporting_text=supporting_text,
             )
 
-            evaluation = self._parse_result(result, pmid)
+            evaluation = self._parse_text_result(result, text_id)
 
-            # Anti-hallucination: verify supporting sentences
-            if evaluation.supporting_sentences:
-                verified, unverified = verify_sentences(
-                    evaluation.supporting_sentences, abstract
-                )
-                if unverified:
-                    logger.warning(
-                        f"PMID {pmid}: {len(unverified)} unverified sentences removed"
-                    )
-                evaluation.supporting_sentences = verified
-
-                if not verified and evaluation.support == "yes":
-                    evaluation.support = "maybe"
-                    evaluation.reasoning += (
-                        " [Auto-corrected: all supporting sentences failed verification]"
-                    )
-
-            # Round 2: Independent re-evaluation for yes/maybe results
             if (
                 use_round2
                 and self.round2_client
                 and evaluation.support in ("yes", "maybe")
             ):
                 logger.info(
-                    f"Running Round 2 re-evaluation for PMID {pmid} "
+                    f"Running Round 2 re-evaluation for {text_id} "
                     f"(Round 1: {evaluation.support})"
                 )
                 try:
-                    r2_result = await self.round2_client.evaluate_triple_support(
+                    r2_result = await self.round2_client.evaluate_text_support(
                         triple=triple,
-                        abstract=abstract,
+                        supporting_text=supporting_text,
                     )
-                    r2_eval = self._parse_result(r2_result, pmid)
-
-                    # Verify Round 2 sentences too
-                    if r2_eval.supporting_sentences:
-                        r2_verified, _ = verify_sentences(
-                            r2_eval.supporting_sentences, abstract
-                        )
-                        r2_eval.supporting_sentences = r2_verified
-
-                    # Round 2 takes precedence
+                    r2_eval = self._parse_text_result(r2_result, text_id)
                     r2_eval.reasoning = (
                         f"[Round2] {r2_eval.reasoning} "
                         f"[Round1 was: {evaluation.support}]"
                     )
                     evaluation = r2_eval
-
                 except Exception as e:
-                    logger.error(f"Round 2 failed for PMID {pmid}: {e}")
+                    logger.error(f"Round 2 failed for {text_id}: {e}")
                     evaluation.reasoning += f" [Round 2 failed: {str(e)}]"
 
             return evaluation
 
         except Exception as e:
-            logger.error(f"Error evaluating PMID {pmid}: {e}")
+            logger.error(f"Error evaluating text {text_id}: {e}")
             return TripleEvaluation(
-                pmid=pmid,
+                text_id=text_id,
                 support="no",
                 reasoning=f"Evaluation failed: {str(e)}",
             )
 
-    def _parse_result(self, result: dict, pmid: str) -> TripleEvaluation:
-        """Parse LLM result dict into a TripleEvaluation.
-
-        Handles both the new format (support/sentences) and legacy format
-        (is_supported/evidence_category/supporting_sentence).
-        """
-        # New format: support + sentences
+    def _parse_text_result(self, result: dict, text_id: str) -> TripleEvaluation:
+        """Parse LLM result from text-mode evaluation."""
         support = result.get("support", "").lower().strip()
-
         if support not in ("yes", "no", "maybe"):
-            # Legacy fallback
             if result.get("is_supported"):
                 support = "yes"
-            elif result.get("evidence_category") == "opposite_assertion":
-                support = "no"
-            elif result.get("evidence_category") in (
-                "missing_qualifier", "wrong_qualifier"
-            ):
-                support = "maybe"
             else:
                 support = "no"
 
-        # Handle sentences field (new) vs supporting_sentence (legacy)
-        sentences = result.get("sentences", [])
-        if not sentences:
-            legacy_sent = result.get("supporting_sentence")
-            if legacy_sent and isinstance(legacy_sent, str) and legacy_sent.strip():
-                sentences = [legacy_sent.strip()]
-
-        if isinstance(sentences, str):
-            sentences = [sentences] if sentences.strip() else []
-
         return TripleEvaluation(
-            pmid=pmid,
+            text_id=text_id,
             support=support,
-            supporting_sentences=sentences,
+            supporting_sentences=[],
             reasoning=result.get("reasoning", ""),
             subject_mentioned=result.get("subject_mentioned", False),
             object_mentioned=result.get("object_mentioned", False),

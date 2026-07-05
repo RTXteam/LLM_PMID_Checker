@@ -165,14 +165,19 @@ class VLLMClient:
             logger.error(f"vLLM API error: {e}")
             raise Exception(f"vLLM API error: {e}")
 
-    async def evaluate_triple_support(
-        self, triple: Union[List[str], 'TripleData'], abstract: str
+    async def evaluate_text_support(
+        self, triple: Union[List[str], 'TripleData'], supporting_text: str
     ) -> Dict[str, Any]:
-        """Evaluate if an abstract supports a given triple."""
-        prompt_text = prompt_builder.build_evaluation_prompt(triple, abstract)
+        """Classify whether a supporting text supports a given triple.
+
+        Uses the text-mode prompt (classification only, no sentence extraction).
+        """
+        prompt_text = prompt_builder.build_text_evaluation_prompt(
+            triple, supporting_text
+        )
 
         preamble = (
-            "Analyze the abstract carefully and provide your final answer as a JSON object.\n"
+            "Analyze the supporting text carefully and provide your final answer as a JSON object.\n"
             "Use <think></think> tags to systematically reason through the evaluation "
             "before providing your final JSON response.\n\n"
         )
@@ -185,7 +190,6 @@ class VLLMClient:
             if not content or not content.strip():
                 return {
                     "support": "no",
-                    "sentences": [],
                     "reasoning": "Empty response from vLLM",
                     "subject_mentioned": False,
                     "object_mentioned": False,
@@ -237,9 +241,8 @@ class VLLMClient:
             except Exception:
                 return {
                     "support": "no",
-                    "sentences": [],
                     "reasoning": f"LLM response not valid JSON: {content[:200]}...",
                 }
         except Exception as e:
-            logger.error(f"Error during vLLM evaluation: {e}")
+            logger.error(f"Error during vLLM text evaluation: {e}")
             raise

@@ -1,6 +1,6 @@
-"""Configuration settings for the LLM PMID Checker system."""
+"""Configuration settings for the LLM TMKP Checker system."""
 import os
-from typing import Optional, List, Dict
+from typing import List, Dict
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -27,10 +27,6 @@ class Settings(BaseModel):
     
     # Default model (first model in available_models)
     default_model: str = ""
-    
-    # NCBI E-utilities configuration
-    ncbi_email: Optional[str] = os.getenv("NCBI_EMAIL")
-    ncbi_api_key: Optional[str] = os.getenv("NCBI_API_KEY")
     
     # Request settings
     max_retries: int = 3
