@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Convert results.db SQLite tables to Parquet files.
 
-Reads the evaluations and evaluations_no_abstract tables from a SQLite
-database and writes them as separate Parquet files.
+Reads the evaluations table from a SQLite database and writes it as a
+Parquet file. If additional tables exist, they are also converted.
 
 """
 

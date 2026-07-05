@@ -109,7 +109,7 @@ Download the unchanged TMKP source data from [Translator KGX STORAGE](https://kg
 
 ```bash
 python scripts/extract_tmkp_edges.py \
-    -i data/tmkp_kgx/normalized_edges.jsonl \
+    -i data/tmkp_kgx/edges.tsv \
     -o data/tmkp_kgx/tmkp_edges_extracted.parquet
 ```
 

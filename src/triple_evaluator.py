@@ -25,7 +25,7 @@ class TripleEvaluationResult:
             object_mentioned = "Yes" if ev.object_mentioned else "No"
 
             main_line = (
-                f"PMID:{ev.pmid}, {support_text}, "
+                f"TextID:{ev.text_id}, {support_text}, "
                 f"Subject:{subject_mentioned}, Object:{object_mentioned}"
             )
 

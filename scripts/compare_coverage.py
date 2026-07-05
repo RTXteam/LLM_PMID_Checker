@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Compare 4-key coverage between the extracted input and evaluation results.
+"""Compare coverage between the extracted input and evaluation results.
 
 Reads:
-  - semmeddb_edges_extracted.parquet  (the input)
-  - results.db  (evaluations + evaluations_no_abstract tables)
+  - tmkp_edges_extracted.parquet  (the input)
+  - results.db  (evaluations table)
 
-Reports duplicate counts, overlap between tables, coverage against the input,
-and lists any missing or extra 4-keys.
+Reports duplicate counts, coverage against the input, and lists any missing
+or extra keys.
 """
 
 import argparse
@@ -19,11 +19,11 @@ import polars as pl
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Compare 4-key coverage between extracted input and results."
+        description="Compare coverage between extracted input and results."
     )
     parser.add_argument(
         "--extracted", "-e",
-        default="data/semmedb_kgx/semmeddb_edges_extracted.parquet",
+        default="data/tmkp_kgx/tmkp_edges_extracted.parquet",
         help="Path to the extracted input Parquet file",
     )
     parser.add_argument(
@@ -34,7 +34,7 @@ def main():
     parser.add_argument(
         "--table", "-t",
         default="evaluations",
-        help="Main evaluations table name (default: evaluations)",
+        help="Evaluations table name (default: evaluations)",
     )
     args = parser.parse_args()
 
@@ -46,8 +46,7 @@ def main():
     if not db_path.exists():
         sys.exit(f"Error: results database not found: {db_path}")
 
-    key_cols = ['subject_curie', 'predicate', 'object_curie', 'PMID']
-    na_table = args.table + "_no_abstract"
+    key_cols = ['subject_curie', 'predicate', 'object_curie', 'supporting_text_id']
 
     # ---- Extracted input ----
     print("Loading extracted input ...")
@@ -68,53 +67,26 @@ def main():
     ).fetchone()[0]
     eval_keys = set()
     for row in conn.execute(
-        f'SELECT subject_curie, predicate, object_curie, PMID FROM "{args.table}"'
+        f'SELECT subject_curie, predicate, object_curie, supporting_text_id '
+        f'FROM "{args.table}"'
     ):
         eval_keys.add(row)
+    conn.close()
+
     print(f"  Total rows:    {eval_count:,}")
     print(f"  Unique 4-keys: {len(eval_keys):,}")
     print(f"  Duplicates:    {eval_count - len(eval_keys):,}")
 
-    # ---- No-abstract table ----
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'"
-    ).fetchall()]
-
-    na_keys = set()
-    na_count = 0
-    if na_table in tables:
-        print(f"\nLoading {na_table} table ...")
-        na_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{na_table}"'
-        ).fetchone()[0]
-        for row in conn.execute(
-            f'SELECT subject_curie, predicate, object_curie, PMID FROM "{na_table}"'
-        ):
-            na_keys.add(row)
-        print(f"  Total rows:    {na_count:,}")
-        print(f"  Unique 4-keys: {len(na_keys):,}")
-        print(f"  Duplicates:    {na_count - len(na_keys):,}")
-    else:
-        print(f"\nNo '{na_table}' table found in {db_path}")
-
-    conn.close()
-
     # ---- Cross-check ----
-    combined = eval_keys | na_keys
-    overlap = eval_keys & na_keys
-
     print(f"\n{'=' * 60}")
-    print("Cross-check Summary")
+    print("Coverage Summary")
     print("=" * 60)
-    print(f"  {args.table} rows:         {eval_count:,}")
-    print(f"  {na_table} rows:  {na_count:,}")
-    print(f"  Overlap between tables:       {len(overlap):,}")
-    print(f"  Combined unique 4-keys:       {len(combined):,}")
-    print(f"  Extracted unique 4-keys:      {ext_unique:,}")
+    print(f"  Extracted unique keys:          {ext_unique:,}")
+    print(f"  Evaluated unique keys:          {len(eval_keys):,}")
 
-    in_results_not_ext = combined - ext_keys
-    in_ext_not_results = ext_keys - combined
-    matched = combined & ext_keys
+    in_results_not_ext = eval_keys - ext_keys
+    in_ext_not_results = ext_keys - eval_keys
+    matched = eval_keys & ext_keys
 
     print(f"\n  In results but NOT in extracted: {len(in_results_not_ext):,}")
     print(f"  In extracted but NOT in results: {len(in_ext_not_results):,}")
@@ -134,7 +106,7 @@ def main():
         for k in list(in_results_not_ext)[:10]:
             print(f"    {k}")
 
-    if not in_ext_not_results and not in_results_not_ext and len(overlap) == 0:
+    if not in_ext_not_results and not in_results_not_ext:
         print(f"\n  *** PERFECT MATCH: All rows accounted for ***")
 
     return 0 if not in_ext_not_results and not in_results_not_ext else 1
