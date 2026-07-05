@@ -7,7 +7,7 @@ Usage:
 
 Example:
     python scripts/download_release_data.py --output-dir results --tag tmkp-v1.0
-    python scripts/download_release_data.py --output-dir results --tag v1.0
+    python scripts/download_release_data.py --output-dir results --tag semmeddb-v1.0
 """
 
 from __future__ import annotations
@@ -27,8 +27,8 @@ RELEASE_CONFIG = {
         "archive_name": "TMKP_Sentences_Evaluation_v1.0.tar.gz",
         "description": "TMKP KGX sentence-level evaluation (gpt-oss-120b)",
     },
-    "v1.0": {
-        "archive_name": "LLM_Pmid_Evaluation_SemMedDB_v1.0.tar.gz",
+    "semmeddb-v1.0": {
+        "archive_name": "LLM_Pmid_Evaluation_SemMedDB_with_names_v1.0.tar.gz",
         "description": "SemMedDB KGX PMID-level evaluation (gpt-oss-120b)",
     },
 }
@@ -106,8 +106,8 @@ def main():
         help="Directory to save downloaded files (default: current directory)",
     )
     parser.add_argument(
-        "--tag", "-t", default="v1.0",
-        help="Release tag to download (default: v1.0). Options: v1.0, tmkp-v1.0",
+        "--tag", "-t", default="tmkp-v1.0",
+        help="Release tag to download (default: tmkp-v1.0). Options: tmkp-v1.0, semmeddb-v1.0",
     )
     parser.add_argument(
         "--no-extract", action="store_true",
