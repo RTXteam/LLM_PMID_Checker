@@ -12,7 +12,7 @@ Given a Parquet (or TSV) file of research triples (e.g., `aspirin biolink:treats
 
 ## Pre-computed Evaluation Results
 
-Pre-computed evaluation results for the full SemMedDB KGX dataset are available as a [GitHub release]([https://github.com/RTXteam/LLM_PMID_Checker/releases/tag/semmeddb-v1.0](https://github.com/RTXteam/LLM_PMID_Checker/releases/tag/semmeddb-v1.0)). If you only need the results, you can skip the setup steps below and download them directly.
+Pre-computed evaluation results for the full SemMedDB KGX dataset are available as a [GitHub release]([https://github.com/RTXteam/LLM_PMID_Checker/releases/tag/semmeddb-v1.0](https://github.com/RTXteam/LLM_PMID_Checker/releases/tag/semmeddb-v1.0). If you only need the results, you can skip the setup steps below and download them directly.
 
 ### Download Results
 
